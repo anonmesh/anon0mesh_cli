@@ -1,0 +1,12 @@
+# anon0mesh RPC Bridge — Python MVP
+# ────────────────────────────────────────────────────────────────────────────────
+
+# Core mesh transport (Reticulum Network Stack)
+rns>=0.7.0
+
+# HTTP client for forwarding RPC calls (beacon-side only)
+requests>=2.31.0
+
+# Optional: offline transaction signing
+# Uncomment if you want to use --sign-offline on the client
+# solders>=0.20.0
