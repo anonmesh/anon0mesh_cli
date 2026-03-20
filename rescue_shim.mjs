@@ -2,7 +2,10 @@
 /**
  * rescue_shim.mjs — Arcium helper shim for anon0mesh beacon
  * ===========================================================
- * Matches useBleRevshareContract.ts exactly — no anchorpy, raw TransactionInstruction.
+ * Built from the actual anon0mesh contract:
+ *   Program ID:  7fvHNYVuZP6EYt68GLUa4kU8f8dCBSaGafL9aDhhtMZN
+ *   Instruction: execute_payment(computation_offset, amount, nonce, pub_key)
+ *   Purpose:     Log encrypted payment stats via Arcium MPC after a tx relays
  *
  * Install: npm install @arcium-hq/client @coral-xyz/anchor @solana/web3.js
  */
@@ -14,9 +17,21 @@ import {
     getComputationAccAddress, getExecutingPoolAccAddress,
     getFeePoolAccAddress, getMempoolAccAddress, getMXEAccAddress,
 } from "@arcium-hq/client";
-import { randomBytes } from "crypto";
+import { randomBytes, createHash } from "crypto";
 
 const [,, cmd, ...args] = process.argv;
+
+// ── Constants from the real contract ──────────────────────────────────────────
+// declare_id!("7fvHNYVuZP6EYt68GLUa4kU8f8dCBSaGafL9aDhhtMZN")
+const MXE_PROGRAM_ID = "7fvHNYVuZP6EYt68GLUa4kU8f8dCBSaGafL9aDhhtMZN";
+
+// Hardcoded in contract:
+// const ARCIUM_SIGNER_PDA: Pubkey = Pubkey::new_from_array([...])
+// = nhy7kthZGJjV3yqbyPuSeo2KhNriia4DQrii8jW3KcC
+const ARCIUM_SIGNER_PDA = "nhy7kthZGJjV3yqbyPuSeo2KhNriia4DQrii8jW3KcC";
+
+// comp_def_offset("payment_stats")
+const COMP_DEF_NAME = "payment_stats";
 
 function u8a(hex)  { return Uint8Array.from(Buffer.from(hex, "hex")); }
 function hex(u8)   { return Buffer.from(u8).toString("hex"); }
@@ -32,8 +47,7 @@ function deserializeLE(bytes) {
 }
 
 // Anchor instruction discriminator: sha256("global:<name>")[0:8]
-async function discriminator(name) {
-    const { createHash } = await import("crypto");
+function disc(name) {
     return createHash("sha256").update(`global:${name}`).digest().slice(0, 8);
 }
 
@@ -84,8 +98,9 @@ try {
         out({ shared_secret_hex: hex(sharedSecret) });
 
     } else if (cmd === "mxe_pubkey") {
+        // Fetch MXE x25519 pubkey from chain
         const [programId, rpcUrl] = args;
-        if (!programId) fail("usage: mxe_pubkey <program_id> [rpc_url]");
+        const progId = programId || MXE_PROGRAM_ID;
 
         const { Connection, PublicKey, Keypair } = await import("@solana/web3.js");
         const anchor = await import("@coral-xyz/anchor");
@@ -96,20 +111,20 @@ try {
             { publicKey: dummyKp.publicKey, signTransaction: async t => t, signAllTransactions: async ts => ts },
             { commitment: "confirmed" }
         );
-        const mxePubkey = await getMXEPublicKey(provider, new PublicKey(programId));
+        const mxePubkey = await getMXEPublicKey(provider, new PublicKey(progId));
         out({ mxe_pubkey_hex: hex(mxePubkey) });
 
     } else if (cmd === "arcium_accounts") {
-        const [programId, compDefName, clusterOffsetStr, computationOffsetStr] = args;
-        if (!programId || !compDefName || !clusterOffsetStr || !computationOffsetStr)
-            fail("usage: arcium_accounts <program_id> <comp_def_name> <cluster_offset> <computation_offset>");
+        // Return all PDAs for execute_payment
+        const [programIdArg, clusterOffsetStr, computationOffsetStr] = args;
+        const programId     = programIdArg || MXE_PROGRAM_ID;
+        const clusterOffset = parseInt(clusterOffsetStr || "456");
 
         const { PublicKey } = await import("@solana/web3.js");
         const anchor        = await import("@coral-xyz/anchor");
-        const clusterOffset     = parseInt(clusterOffsetStr);
-        const computationOffset = new anchor.BN(computationOffsetStr);
+        const computationOffset = new anchor.BN(computationOffsetStr || "0");
         const progPubkey        = new PublicKey(programId);
-        const compDefOffset     = Buffer.from(getCompDefAccOffset(compDefName)).readUInt32LE();
+        const compDefOffset     = Buffer.from(getCompDefAccOffset(COMP_DEF_NAME)).readUInt32LE();
 
         out({
             computationAccount: getComputationAccAddress(clusterOffset, computationOffset).toBase58(),
@@ -120,90 +135,139 @@ try {
             compDefAccount:     getCompDefAccAddress(progPubkey, compDefOffset).toBase58(),
             poolAccount:        getFeePoolAccAddress().toBase58(),
             clockAccount:       getClockAccAddress().toBase58(),
+            signPda:            ARCIUM_SIGNER_PDA,
             compDefOffset,
         });
 
-    } else if (cmd === "queue_computation") {
-        // ── Build + sign + send the Arcium computation transaction ──────────────
-        // Mirrors createPaymentTransaction() from useBleRevshareContract.ts exactly.
-        // No anchorpy — raw TransactionInstruction like the real hook.
+    } else if (cmd === "execute_payment") {
+        // ── Build + sign + send execute_payment instruction ────────────────────
+        // Matches contract exactly:
+        //   execute_payment(computation_offset: u64, amount: u64, nonce: u128, pub_key: [u8;32])
         //
-        // Args JSON: { rpcUrl, programId, payerKeypairHex, compDefName,
-        //              clusterOffset, computationOffset, pubKeyHex,
-        //              nonceBn, encryptedAddress }
+        // Instruction data layout (from useBleRevshareContract.ts):
+        //   [discriminator 8B][computation_offset 8B LE][amount 8B LE][nonce 16B LE][pub_key 32B]
+        //
+        // Called by the beacon AFTER successfully relaying a sendTransaction,
+        // to log encrypted payment statistics via Arcium MPC.
+        //
+        // Args JSON: {
+        //   rpcUrl, programId?, payerKeypairHex, clusterOffset?,
+        //   amount, pubKeyHex, nonceBn,
+        //   -- token accounts for the payment --
+        //   recipientB58, mintB58,
+        //   payerTokenAccountB58, recipientTokenAccountB58,
+        //   broadcasterB58?, broadcasterKeypairHex?, broadcasterTokenAccountB58?
+        // }
         const argsJson = args[0];
-        if (!argsJson) fail("usage: queue_computation <json>");
+        if (!argsJson) fail("usage: execute_payment <json>");
 
         const p = JSON.parse(argsJson);
         const {
-            rpcUrl, programId, payerKeypairHex, compDefName,
-            clusterOffset, computationOffset: compOffsetStr,
-            pubKeyHex, nonceBn, encryptedAddress,
+            rpcUrl,
+            programId:          progIdArg,
+            payerKeypairHex,
+            clusterOffset:      clusterOffStr,
+            amount,
+            pubKeyHex,
+            nonceBn,
+            recipientB58,
+            mintB58,
+            payerTokenAccountB58,
+            recipientTokenAccountB58,
+            broadcasterB58,
+            broadcasterKeypairHex,
+            broadcasterTokenAccountB58,
         } = p;
 
         const {
             Connection, PublicKey, Keypair,
             Transaction, TransactionInstruction, SystemProgram,
         } = await import("@solana/web3.js");
+        const { TOKEN_PROGRAM_ID } = await import("@solana/spl-token");
         const anchor = await import("@coral-xyz/anchor");
 
-        const connection        = new Connection(rpcUrl, "confirmed");
-        const payerKp           = Keypair.fromSecretKey(u8a(payerKeypairHex));
-        const progPubkey        = new PublicKey(programId);
-        const compOffset        = new anchor.BN(compOffsetStr);
-        const clusterOff        = parseInt(clusterOffset);
-        const compDefOffset     = Buffer.from(getCompDefAccOffset(compDefName)).readUInt32LE();
+        const programId     = progIdArg || MXE_PROGRAM_ID;
+        const connection    = new Connection(rpcUrl || "https://api.devnet.solana.com", "confirmed");
+        const payerKp       = Keypair.fromSecretKey(u8a(payerKeypairHex));
+        const progPubkey    = new PublicKey(programId);
+        const clusterOffset = parseInt(clusterOffStr || "456");
 
-        // PDAs — exact mirror of getArciumAccounts()
-        const computationAccount = getComputationAccAddress(clusterOff, compOffset);
-        const clusterAccount     = getClusterAccAddress(clusterOff);
+        // Random computation offset
+        const compOffsetBN  = new anchor.BN(Date.now());
+        const compDefOffset = Buffer.from(getCompDefAccOffset(COMP_DEF_NAME)).readUInt32LE();
+
+        // PDAs — exact match to getArciumAccounts() in the hook
+        const computationAccount = getComputationAccAddress(clusterOffset, compOffsetBN);
+        const clusterAccount     = getClusterAccAddress(clusterOffset);
         const mxeAccount         = getMXEAccAddress(progPubkey);
-        const mempoolAccount     = getMempoolAccAddress(clusterOff);
-        const executingPool      = getExecutingPoolAccAddress(clusterOff);
+        const mempoolAccount     = getMempoolAccAddress(clusterOffset);
+        const executingPool      = getExecutingPoolAccAddress(clusterOffset);
         const compDefAccount     = getCompDefAccAddress(progPubkey, compDefOffset);
         const poolAccount        = getFeePoolAccAddress();
         const clockAccount       = getClockAccAddress();
+        const signPda            = new PublicKey(ARCIUM_SIGNER_PDA);
 
-        const [signPda] = PublicKey.findProgramAddressSync(
-            [Buffer.from("ArciumSignerAccount")], progPubkey
+        // Whitelist PDA: seeds = [b"whitelist", mint]
+        const mint = new PublicKey(mintB58);
+        const [whitelistEntry] = PublicKey.findProgramAddressSync(
+            [Buffer.from("whitelist"), mint.toBuffer()], progPubkey
         );
 
-        // Instruction discriminator: sha256("global:queue_confidential_balance")[0:8]
-        const disc = await discriminator("queue_confidential_balance");
-
-        // Instruction data layout (matches Anchor serialization):
-        //   [disc 8B][computation_offset 8B LE][pub_key 32B][nonce 16B LE][enc_address 32B]
-        const data = Buffer.alloc(8 + 8 + 32 + 16 + 32);
-        disc.copy(data, 0);
-        data.writeBigUInt64LE(BigInt(compOffsetStr), 8);
-        Buffer.from(u8a(pubKeyHex)).copy(data, 16);
-        // nonce as u128 LE (16 bytes)
+        // Instruction data layout from useBleRevshareContract.ts createPaymentTransaction():
+        //   [discriminator 8B][computation_offset 8B LE][amount 8B LE][nonce 16B LE][pub_key 32B]
+        const ix_data = Buffer.alloc(8 + 8 + 8 + 16 + 32);
+        disc("execute_payment").copy(ix_data, 0);
+        ix_data.writeBigUInt64LE(BigInt(compOffsetBN.toString()), 8);
+        ix_data.writeBigUInt64LE(BigInt(amount), 16);
+        // nonce as u128 LE (two u64s)
         const nonceBig = BigInt(nonceBn);
-        data.writeBigUInt64LE(nonceBig & 0xFFFFFFFFFFFFFFFFn, 48);
-        data.writeBigUInt64LE(nonceBig >> 64n,                 56);
-        Buffer.from(encryptedAddress).copy(data, 64);
+        ix_data.writeBigUInt64LE(nonceBig & 0xFFFFFFFFFFFFFFFFn, 24);
+        ix_data.writeBigUInt64LE(nonceBig >> 64n, 32);
+        Buffer.from(u8a(pubKeyHex)).copy(ix_data, 40);
+
+        const recipient    = new PublicKey(recipientB58);
+        const payerTA      = new PublicKey(payerTokenAccountB58);
+        const recipientTA  = new PublicKey(recipientTokenAccountB58);
+        const broadcaster  = broadcasterB58 ? new PublicKey(broadcasterB58) : null;
+        const broadcasterTA = broadcasterTokenAccountB58 ? new PublicKey(broadcasterTokenAccountB58) : null;
 
         const keys = [
-            { pubkey: payerKp.publicKey, isSigner: true,  isWritable: true  },
-            { pubkey: signPda,           isSigner: false, isWritable: true  },
-            { pubkey: mxeAccount,        isSigner: false, isWritable: false },
-            { pubkey: mempoolAccount,    isSigner: false, isWritable: true  },
-            { pubkey: executingPool,     isSigner: false, isWritable: true  },
-            { pubkey: computationAccount,isSigner: false, isWritable: true  },
-            { pubkey: compDefAccount,    isSigner: false, isWritable: false },
-            { pubkey: clusterAccount,    isSigner: false, isWritable: true  },
-            { pubkey: poolAccount,       isSigner: false, isWritable: true  },
-            { pubkey: clockAccount,      isSigner: false, isWritable: true  },
-            { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+            { pubkey: payerKp.publicKey, isSigner: true,        isWritable: true  },
+            // Optional broadcaster — pass pubkey as non-signer if not signing
+            { pubkey: broadcaster || payerKp.publicKey,
+              isSigner: !!broadcasterKeypairHex, isWritable: false },
+            { pubkey: recipient,         isSigner: false,        isWritable: false },
+            { pubkey: mint,              isSigner: false,        isWritable: false },
+            { pubkey: whitelistEntry,    isSigner: false,        isWritable: false },
+            { pubkey: payerTA,           isSigner: false,        isWritable: true  },
+            { pubkey: recipientTA,       isSigner: false,        isWritable: true  },
+            // Optional broadcaster token account
+            { pubkey: broadcasterTA || payerTA, isSigner: false, isWritable: !!broadcasterTA },
+            { pubkey: signPda,           isSigner: false,        isWritable: true  },
+            { pubkey: mxeAccount,        isSigner: false,        isWritable: false },
+            { pubkey: mempoolAccount,    isSigner: false,        isWritable: true  },
+            { pubkey: executingPool,     isSigner: false,        isWritable: true  },
+            { pubkey: computationAccount,isSigner: false,        isWritable: true  },
+            { pubkey: compDefAccount,    isSigner: false,        isWritable: false },
+            { pubkey: clusterAccount,    isSigner: false,        isWritable: true  },
+            { pubkey: poolAccount,       isSigner: false,        isWritable: true  },
+            { pubkey: clockAccount,      isSigner: false,        isWritable: true  },
+            { pubkey: TOKEN_PROGRAM_ID,  isSigner: false,        isWritable: false },
+            { pubkey: SystemProgram.programId, isSigner: false,  isWritable: false },
+            { pubkey: progPubkey,        isSigner: false,        isWritable: false }, // arcium_program
         ];
 
-        const ix = new TransactionInstruction({ keys, programId: progPubkey, data });
-        const tx = new Transaction().add(ix);
-
+        const ix  = new TransactionInstruction({ keys, programId: progPubkey, data: ix_data });
+        const tx  = new Transaction().add(ix);
         const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
         tx.recentBlockhash = blockhash;
         tx.feePayer = payerKp.publicKey;
-        tx.sign(payerKp);
+
+        const signers = [payerKp];
+        if (broadcasterKeypairHex) {
+            signers.push(Keypair.fromSecretKey(u8a(broadcasterKeypairHex)));
+        }
+        tx.sign(...signers);
 
         const sig = await connection.sendRawTransaction(tx.serialize());
         await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight });
@@ -214,7 +278,7 @@ try {
         });
 
     } else {
-        fail(`Unknown command: ${cmd || "(none)"}. Use: keygen | encrypt | decrypt | shared_secret | mxe_pubkey | arcium_accounts | queue_computation`);
+        fail(`Unknown command: ${cmd || "(none)"}. Use: keygen | encrypt | decrypt | shared_secret | mxe_pubkey | arcium_accounts | execute_payment`);
     }
 
 } catch (err) {

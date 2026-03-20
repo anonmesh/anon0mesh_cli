@@ -28,6 +28,21 @@ import argparse
 import os
 import json
 import threading
+
+# ── SSL cert fix — must happen before importing requests ──────────────────────
+# If certifi's .pem is missing (broken venv), fall back to the system bundle.
+import certifi as _certifi
+if not os.path.isfile(_certifi.where()):
+    _system_certs = "/etc/ssl/certs/ca-certificates.crt"
+    if os.path.isfile(_system_certs):
+        os.environ["REQUESTS_CA_BUNDLE"] = _system_certs
+        os.environ["SSL_CERT_FILE"]      = _system_certs
+# Also respect .env override
+_env_cert = os.getenv("REQUESTS_CA_BUNDLE", "")
+if _env_cert and os.path.isfile(_env_cert):
+    os.environ["REQUESTS_CA_BUNDLE"] = _env_cert
+    os.environ["SSL_CERT_FILE"]      = _env_cert
+
 import requests
 
 # ── Reticulum ──────────────────────────────────────────────────────────────────
@@ -80,7 +95,7 @@ if _env_file.exists():
 
 # ── Arcium MPC integration (optional — enabled via ARCIUM_ENABLED=1) ───────────
 try:
-    from arcium_client import ArciumBeacon, rescue_keygen
+    from arcium_client import ArciumBeacon, rescue_keygen, rescue_encrypt, rescue_decrypt
     HAS_ARCIUM_MODULE = True
 except ImportError:
     HAS_ARCIUM_MODULE = False
@@ -100,11 +115,16 @@ request_lock       = threading.Lock()
 def forward_plain_rpc(req: dict, req_id: int, count: int, method: str) -> bytes:
     """Forward a JSON-RPC request to the Solana HTTP endpoint and return raw bytes."""
     try:
+        # Determine SSL cert path — fall back to system bundle if certifi is broken
+        import certifi as _c
+        _cert = _c.where() if os.path.isfile(_c.where()) else "/etc/ssl/certs/ca-certificates.crt"
+
         http_resp = requests.post(
             rpc_endpoint,
             json=req,
             timeout=20,
             headers={"Content-Type": "application/json"},
+            verify=_cert,
         )
         http_resp.raise_for_status()
         try:
@@ -151,31 +171,37 @@ def forward_to_solana(raw_request: bytes) -> bytes:
 
     log_tx(f"[#{count}] Mesh→Beacon  method={method}  params_len={len(json.dumps(params))}")
 
-    # ── Arcium confidential path ───────────────────────────────────────────────
-    # Client signals a confidential request by passing a dict instead of a string
-    # as the first param, containing {enc_address, ephem_pub, nonce, comp_def_offset}
-    if (
-        method == "getBalance"
-        and arcium is not None
-        and arcium.enabled
-        and params
-        and isinstance(params[0], dict)
-        and "enc_address" in params[0]
-    ):
-        p = params[0]
-        log_info(f"[#{count}] Routing to Arcium MPC  (confidential getBalance)")
-        result = arcium.confidential_get_balance(
-            encrypted_address = p["enc_address"],          # [u8;32] list
-            client_pubkey_hex = p["ephem_pub"],            # hex string
-            nonce_bn          = str(p["nonce"]),           # u128 decimal
-            comp_def_name     = p.get("comp_def_name", "payment_stats"),
-        )
-        if result is None:
-            return build_response(error="Arcium computation failed", req_id=req_id)
-        return build_response(result=result, req_id=req_id)
+    # ── Plain RPC path ────────────────────────────────────────────────────────
+    result_bytes = forward_plain_rpc(req, req_id, count, method)
 
-    # ── Plain RPC path ─────────────────────────────────────────────────────────
-    return forward_plain_rpc(req, req_id, count, method)
+    # ── Arcium: log payment stats after sendTransaction ────────────────────────
+    # The beacon logs encrypted payment stats to the anon0mesh MXE after every
+    # successful sendTransaction. Fire-and-forget — doesn't delay the response.
+    if method == "sendTransaction" and arcium and arcium.enabled:
+        try:
+            parsed_result = decode_json(result_bytes)
+            # Only log if the tx was accepted (has a signature, no error)
+            if "result" in parsed_result and isinstance(parsed_result["result"], str):
+                # Client can pass optional Arcium metadata as extra params
+                # params[1] = {"arcium": {"amount": ..., "payer_ta": ..., ...}}
+                arcium_meta = {}
+                if len(params) > 1 and isinstance(params[1], dict):
+                    arcium_meta = params[1].get("arcium", {})
+                if arcium_meta.get("amount") and arcium_meta.get("mint"):
+                    arcium.log_payment_stats(
+                        amount                   = int(arcium_meta["amount"]),
+                        payer_token_account      = arcium_meta.get("payer_ta", ""),
+                        recipient                = arcium_meta.get("recipient", ""),
+                        recipient_token_account  = arcium_meta.get("recipient_ta", ""),
+                        mint                     = arcium_meta["mint"],
+                        broadcaster              = arcium_meta.get("broadcaster"),
+                        broadcaster_token_account = arcium_meta.get("broadcaster_ta"),
+                    )
+                    log_info(f"[#{count}] Arcium payment stats queued (fire-and-forget)")
+        except Exception:
+            pass  # never block the response over stats logging
+
+    return result_bytes
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -291,7 +317,7 @@ def _test_arcium() -> None:
         print()
         return
 
-    log_ok("Layer 1 ✔  ArciumBeacon initialised  (anchorpy + solana connected)")
+    log_ok("Layer 1 ✔  ArciumBeacon initialised  (solana-py connected)")
 
     # ── Layer 2: MXE pubkey from chain ────────────────────────────────────────
     mxe_pubkey_hex = os.getenv("ARCIUM_MXE_PUBKEY_HEX", "")
@@ -322,11 +348,12 @@ def _test_arcium() -> None:
     # ── Summary ───────────────────────────────────────────────────────────────
     print()
     if arcium and arcium.enabled:
-        log_ok(f"Arcium MPC ACTIVE — confidential getBalance enabled")
-        log_info("  Encrypted requests:  params=[{enc_address:..., ephem_pub:..., nonce:...}]")
-        log_info("  Plain requests:      params=[\"<WALLET_ADDRESS>\"]  (unchanged)")
+        log_ok("Arcium MPC ACTIVE — payment stats will be logged after sendTransaction")
+        log_info("  Program:    7fvHNYVuZP6EYt68GLUa4kU8f8dCBSaGafL9aDhhtMZN")
+        log_info("  Instruction: execute_payment (logs encrypted amount via MPC)")
+        log_info("  Triggered by: sendTransaction with arcium metadata in params")
     else:
-        log_warn("Arcium MPC INACTIVE — all requests use plain Solana RPC")
+        log_warn("Arcium MPC INACTIVE — payment stats not logged")
     print()
 
 
