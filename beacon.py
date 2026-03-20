@@ -68,10 +68,28 @@ from shared import (
     BOLD, CYAN, GREEN, RESET, DIM,
 )
 
+# ── Auto-load .env if present ─────────────────────────────────────────────────
+from pathlib import Path
+_env_file = Path(__file__).parent / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
+
+# ── Arcium MPC integration (optional — enabled via ARCIUM_ENABLED=1) ───────────
+try:
+    from arcium_client import ArciumBeacon, rescue_keygen
+    HAS_ARCIUM_MODULE = True
+except ImportError:
+    HAS_ARCIUM_MODULE = False
+
 # ── State ──────────────────────────────────────────────────────────────────────
 beacon_identity    = None
 beacon_destination = None
 rpc_endpoint       = None
+arcium: "ArciumBeacon | None" = None
 request_count      = 0
 request_lock       = threading.Lock()
 
@@ -79,11 +97,41 @@ request_lock       = threading.Lock()
 # RPC Forwarding
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def forward_plain_rpc(req: dict, req_id: int, count: int, method: str) -> bytes:
+    """Forward a JSON-RPC request to the Solana HTTP endpoint and return raw bytes."""
+    try:
+        http_resp = requests.post(
+            rpc_endpoint,
+            json=req,
+            timeout=20,
+            headers={"Content-Type": "application/json"},
+        )
+        http_resp.raise_for_status()
+        try:
+            parsed = http_resp.json()
+            if "result" in parsed:
+                log_ok(f"[#{count}] Solana ✔  method={method}  type={type(parsed['result']).__name__}")
+            elif "error" in parsed:
+                log_warn(f"[#{count}] Solana error: {parsed['error'].get('message', '?')}")
+        except Exception:
+            pass
+        return http_resp.content
+    except requests.exceptions.Timeout:
+        log_err(f"[#{count}] Solana RPC timeout  method={method}")
+        return build_response(error="Solana RPC timeout", req_id=req_id)
+    except requests.exceptions.ConnectionError as exc:
+        log_err(f"[#{count}] Solana connection error: {exc}")
+        return build_response(error=f"Solana connection error: {exc}", req_id=req_id)
+    except Exception as exc:
+        log_err(f"[#{count}] Unexpected error: {exc}")
+        return build_response(error=str(exc), req_id=req_id)
+
+
 def forward_to_solana(raw_request: bytes) -> bytes:
     """
-    Parse an incoming JSON-RPC request from the mesh, forward it to the
-    Solana RPC endpoint, and return the raw JSON response bytes.
-    Supports any Solana JSON-RPC method (getBalance, sendTransaction, …).
+    Route an incoming JSON-RPC request:
+      - Encrypted getBalance  → Arcium MPC (confidential, beacon never sees address/balance)
+      - Everything else       → plain Solana RPC
     """
     global request_count
 
@@ -93,9 +141,9 @@ def forward_to_solana(raw_request: bytes) -> bytes:
         log_err(f"Failed to parse RPC payload: {exc}")
         return build_response(error=f"Invalid JSON payload: {exc}")
 
-    method  = req.get("method", "?")
-    req_id  = req.get("id", 1)
-    params  = req.get("params", [])
+    method = req.get("method", "?")
+    req_id = req.get("id", 1)
+    params = req.get("params", [])
 
     with request_lock:
         request_count += 1
@@ -103,37 +151,31 @@ def forward_to_solana(raw_request: bytes) -> bytes:
 
     log_tx(f"[#{count}] Mesh→Beacon  method={method}  params_len={len(json.dumps(params))}")
 
-    try:
-        http_resp = requests.post(
-            rpc_endpoint,
-            json=req,          # re-transmit the full JSON-RPC object as-is
-            timeout=20,
-            headers={"Content-Type": "application/json"},
+    # ── Arcium confidential path ───────────────────────────────────────────────
+    # Client signals a confidential request by passing a dict instead of a string
+    # as the first param, containing {enc_address, ephem_pub, nonce, comp_def_offset}
+    if (
+        method == "getBalance"
+        and arcium is not None
+        and arcium.enabled
+        and params
+        and isinstance(params[0], dict)
+        and "enc_address" in params[0]
+    ):
+        p = params[0]
+        log_info(f"[#{count}] Routing to Arcium MPC  (confidential getBalance)")
+        result = arcium.confidential_get_balance(
+            encrypted_address = p["enc_address"],          # [u8;32] list
+            client_pubkey_hex = p["ephem_pub"],            # hex string
+            nonce_bn          = str(p["nonce"]),           # u128 decimal
+            comp_def_name     = p.get("comp_def_name", "payment_stats"),
         )
-        http_resp.raise_for_status()
-        result_bytes = http_resp.content          # raw bytes of the JSON response
+        if result is None:
+            return build_response(error="Arcium computation failed", req_id=req_id)
+        return build_response(result=result, req_id=req_id)
 
-        # Log result summary without leaking full balance data to terminal
-        try:
-            parsed = http_resp.json()
-            if "result" in parsed:
-                log_ok(f"[#{count}] Beacon→Solana ✔  method={method}  result_type={type(parsed['result']).__name__}")
-            elif "error" in parsed:
-                log_warn(f"[#{count}] Solana error: {parsed['error'].get('message', '?')}")
-        except Exception:
-            pass
-
-        return result_bytes
-
-    except requests.exceptions.Timeout:
-        log_err(f"[#{count}] Solana RPC timeout for {method}")
-        return build_response(error="Solana RPC timeout", req_id=req_id)
-    except requests.exceptions.ConnectionError as exc:
-        log_err(f"[#{count}] Solana connection error: {exc}")
-        return build_response(error=f"Solana connection error: {exc}", req_id=req_id)
-    except Exception as exc:
-        log_err(f"[#{count}] Unexpected error: {exc}")
-        return build_response(error=str(exc), req_id=req_id)
+    # ── Plain RPC path ─────────────────────────────────────────────────────────
+    return forward_plain_rpc(req, req_id, count, method)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -204,6 +246,91 @@ def announce_loop(interval_sec: int = 300):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Arcium connection test
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _test_arcium() -> None:
+    """
+    Run at beacon startup to verify every layer of the Arcium integration:
+
+      Layer 0 — rescue_shim.mjs reachable      (Node.js + @arcium-hq/client)
+      Layer 1 — ArciumBeacon initialises        (.env vars, anchorpy, solana)
+      Layer 2 — MXE pubkey fetchable from chain (RPC + program account)
+      Layer 3 — RescueCipher round-trip         (encrypt → decrypt = original)
+    """
+    global arcium
+
+    print()
+    log_info("─── Arcium connection test ───────────────────────────────────────")
+
+    # ── Layer 0: rescue_shim.mjs ───────────────────────────────────────────────
+    try:
+        priv_hex, pub_hex = rescue_keygen()
+        log_ok(f"Layer 0 ✔  rescue_shim.mjs reachable  (keygen pubkey={pub_hex[:16]}…)")
+    except Exception as exc:
+        log_warn(f"Layer 0 ✘  rescue_shim.mjs: {exc}")
+        log_warn("  Fix: npm install @arcium-hq/client  (in project dir)")
+        log_warn("  Arcium confidential RPC disabled")
+        arcium = None
+        print()
+        return
+
+    # ── Layer 1: ArciumBeacon from env ────────────────────────────────────────
+    if os.getenv("ARCIUM_ENABLED", "0") != "1":
+        log_info("Layer 1 –  ARCIUM_ENABLED not set — confidential RPC disabled")
+        log_info("  To enable: add ARCIUM_ENABLED=1 to your .env file")
+        arcium = None
+        print()
+        return
+
+    arcium = ArciumBeacon.from_env()
+
+    if not arcium.enabled:
+        log_warn("Layer 1 ✘  ArciumBeacon failed to initialise")
+        log_warn("  Check: ARCIUM_PAYER_KEYPAIR, ARCIUM_MXE_PROGRAM_ID, ARCIUM_MXE_PUBKEY_HEX in .env")
+        print()
+        return
+
+    log_ok("Layer 1 ✔  ArciumBeacon initialised  (anchorpy + solana connected)")
+
+    # ── Layer 2: MXE pubkey from chain ────────────────────────────────────────
+    mxe_pubkey_hex = os.getenv("ARCIUM_MXE_PUBKEY_HEX", "")
+    if not mxe_pubkey_hex:
+        log_warn("Layer 2 –  ARCIUM_MXE_PUBKEY_HEX not set")
+        log_warn("  Run:  node rescue_shim.mjs mxe_pubkey <PROGRAM_ID>")
+        log_warn("  Then add ARCIUM_MXE_PUBKEY_HEX=<result> to .env")
+    else:
+        log_ok(f"Layer 2 ✔  MXE pubkey loaded  ({mxe_pubkey_hex[:16]}…)")
+
+    # ── Layer 3: RescueCipher round-trip ──────────────────────────────────────
+    if mxe_pubkey_hex:
+        try:
+            from arcium_client import rescue_encrypt, rescue_decrypt, rescue_shared_secret
+            test_values  = [42, 101]
+            enc          = rescue_encrypt(mxe_pubkey_hex, test_values)
+            shared_secret = enc["shared_secret_hex"]
+            decrypted    = rescue_decrypt(shared_secret, enc["ciphertexts"], enc["nonce_hex"])
+            assert decrypted == test_values, f"mismatch: {decrypted} != {test_values}"
+            log_ok(f"Layer 3 ✔  RescueCipher round-trip  encrypt([42,101]) → decrypt = {decrypted}")
+        except AssertionError as exc:
+            log_err(f"Layer 3 ✘  RescueCipher round-trip FAILED: {exc}")
+        except Exception as exc:
+            log_warn(f"Layer 3 ✘  RescueCipher test error: {exc}")
+    else:
+        log_info("Layer 3 –  Skipped (no MXE pubkey)")
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    print()
+    if arcium and arcium.enabled:
+        log_ok(f"Arcium MPC ACTIVE — confidential getBalance enabled")
+        log_info("  Encrypted requests:  params=[{enc_address:..., ephem_pub:..., nonce:...}]")
+        log_info("  Plain requests:      params=[\"<WALLET_ADDRESS>\"]  (unchanged)")
+    else:
+        log_warn("Arcium MPC INACTIVE — all requests use plain Solana RPC")
+    print()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Setup
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -222,7 +349,7 @@ def setup_beacon(config_path: str | None, network: str, custom_rpc: str | None, 
     log_info(f"Solana RPC endpoint: {rpc_endpoint}")
 
     # ── Start Reticulum ────────────────────────────────────────────────────────
-    RNS.Reticulum(config_path)
+    reticulum = RNS.Reticulum(config_path)
 
     # Give Transport time to finish setting its identity before any TCPInterface
     # reconnect threads fire synthesize_tunnel. Without this, the first
@@ -285,6 +412,13 @@ def setup_beacon(config_path: str | None, network: str, custom_rpc: str | None, 
     print()
     print(f"  Share this hash with clients:  {BOLD}{dest_hash}{RESET}")
     print()
+
+    # ── Arcium MPC init + connection test ─────────────────────────────────────
+    global arcium
+    if HAS_ARCIUM_MODULE:
+        _test_arcium()
+    else:
+        log_warn("arcium_client.py not found — confidential RPC disabled")
 
     # ── Start re-announce thread ───────────────────────────────────────────────
     t = threading.Thread(target=announce_loop, args=(announce_interval,), daemon=True)
