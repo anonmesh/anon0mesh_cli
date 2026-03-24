@@ -90,8 +90,23 @@ def banner(role: str) -> None:
 """)
 
 
-def log_info(msg: str)  -> None: print(f"{DIM}[{time.strftime('%H:%M:%S')}]{RESET} {CYAN}ℹ {msg}{RESET}")
+_quiet_mode = False
+
+
+def set_quiet(quiet: bool) -> None:
+    """Suppress log_info and log_tx during interactive operations."""
+    global _quiet_mode
+    _quiet_mode = quiet
+
+
+def log_info(msg: str)  -> None:
+    if not _quiet_mode:
+        print(f"{DIM}[{time.strftime('%H:%M:%S')}]{RESET} {CYAN}ℹ {msg}{RESET}")
+
 def log_ok(msg: str)    -> None: print(f"{DIM}[{time.strftime('%H:%M:%S')}]{RESET} {GREEN}✔ {msg}{RESET}")
 def log_warn(msg: str)  -> None: print(f"{DIM}[{time.strftime('%H:%M:%S')}]{RESET} {YELLOW}⚠ {msg}{RESET}")
 def log_err(msg: str)   -> None: print(f"{DIM}[{time.strftime('%H:%M:%S')}]{RESET} {RED}✘ {msg}{RESET}")
-def log_tx(msg: str)    -> None: print(f"{DIM}[{time.strftime('%H:%M:%S')}]{RESET} {BOLD}➤ {msg}{RESET}")
+
+def log_tx(msg: str)    -> None:
+    if not _quiet_mode:
+        print(f"{DIM}[{time.strftime('%H:%M:%S')}]{RESET} {BOLD}➤ {msg}{RESET}")

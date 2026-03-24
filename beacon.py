@@ -100,13 +100,126 @@ try:
 except ImportError:
     HAS_ARCIUM_MODULE = False
 
+# ── Solders (optional — enables tx co-signing) ─────────────────────────────────
+try:
+    import base64 as _base64
+    from solders.keypair    import Keypair     as _Keypair
+    from solders.transaction import Transaction as _Transaction
+    from solders.hash        import Hash        as _Hash
+    HAS_SOLDERS = True
+except ImportError:
+    HAS_SOLDERS = False
+
 # ── State ──────────────────────────────────────────────────────────────────────
-beacon_identity    = None
-beacon_destination = None
-rpc_endpoint       = None
+beacon_identity         = None
+beacon_destination      = None
+rpc_endpoint            = None
 arcium: "ArciumBeacon | None" = None
-request_count      = 0
-request_lock       = threading.Lock()
+beacon_cosign_keypair   = None   # Keypair used to co-sign client Arcium txs
+request_count           = 0
+request_lock            = threading.Lock()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RPC Forwarding
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Arcium co-sign handlers  (getBeaconPubkey / cosignTransaction)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _handle_get_beacon_pubkey(req_id: int) -> bytes:
+    """Return the beacon's co-signing pubkey so clients can build co-sign txs."""
+    if not HAS_SOLDERS or beacon_cosign_keypair is None:
+        return build_response(
+            error="Beacon co-signing keypair not configured (set ARCIUM_PAYER_KEYPAIR)",
+            req_id=req_id,
+        )
+    return build_response(result=str(beacon_cosign_keypair.pubkey()), req_id=req_id)
+
+
+def _handle_cosign_transaction(params: list, req_id: int, count: int) -> bytes:
+    """
+    Co-sign a partially-signed client transaction and submit it to Solana.
+    params[0]: base64-encoded partially-signed transaction
+    params[1]: optional {"arcium": {...}} metadata for post-relay stats logging
+    """
+    if not HAS_SOLDERS or beacon_cosign_keypair is None:
+        return build_response(error="Beacon co-signing keypair not configured", req_id=req_id)
+    if not params or not isinstance(params[0], str):
+        return build_response(error="cosignTransaction: params[0] must be a base64 tx", req_id=req_id)
+
+    try:
+        tx_bytes = _base64.b64decode(params[0])
+        tx       = _Transaction.from_bytes(tx_bytes)
+        bh       = tx.message.recent_blockhash
+        tx.partial_sign([beacon_cosign_keypair], bh)
+        fully_signed_b64 = _base64.b64encode(bytes(tx)).decode()
+    except Exception as exc:
+        log_err(f"[#{count}] Co-sign error: {exc}")
+        return build_response(error=f"Co-sign failed: {exc}", req_id=req_id)
+
+    submit_req   = {"jsonrpc": "2.0", "id": req_id, "method": "sendTransaction",
+                    "params": [fully_signed_b64, {"encoding": "base64"}]}
+    result_bytes = forward_plain_rpc(submit_req, req_id, count, "sendTransaction[co-signed]")
+
+    # Fire-and-forget Arcium stats (same as the plain sendTransaction path)
+    arcium_meta = params[1].get("arcium", {}) if len(params) > 1 and isinstance(params[1], dict) else {}
+    if arcium and arcium.enabled and arcium_meta.get("amount") and arcium_meta.get("mint"):
+        try:
+            parsed = decode_json(result_bytes)
+            if "result" in parsed and isinstance(parsed["result"], str):
+                arcium.log_payment_stats(
+                    amount                    = int(arcium_meta["amount"]),
+                    payer_token_account       = arcium_meta.get("payer_ta", ""),
+                    recipient                 = arcium_meta.get("recipient", ""),
+                    recipient_token_account   = arcium_meta.get("recipient_ta", ""),
+                    mint                      = arcium_meta["mint"],
+                    broadcaster               = arcium_meta.get("broadcaster"),
+                    broadcaster_token_account = arcium_meta.get("broadcaster_ta"),
+                )
+                log_info(f"[#{count}] Arcium payment stats queued (co-sign path)")
+        except Exception:
+            pass
+
+    return result_bytes
+
+
+def _dispatch_cosign(method: str, params: list, req_id: int, count: int) -> "bytes | None":
+    """Route Arcium co-sign protocol methods. Returns None for all other methods."""
+    if method == "getBeaconPubkey":
+        return _handle_get_beacon_pubkey(req_id)
+    if method == "cosignTransaction":
+        return _handle_cosign_transaction(params, req_id, count)
+    return None
+
+
+def _maybe_log_arcium_stats(params: list, result_bytes: bytes, count: int) -> None:
+    """
+    Fire-and-forget: log encrypted payment stats to the Arcium MXE after a
+    successful sendTransaction.  Never raises — must not block the response.
+    Client may pass optional metadata as params[1] = {"arcium": {...}}.
+    """
+    try:
+        parsed_result = decode_json(result_bytes)
+        if not ("result" in parsed_result and isinstance(parsed_result["result"], str)):
+            return
+        arcium_meta = {}
+        if len(params) > 1 and isinstance(params[1], dict):
+            arcium_meta = params[1].get("arcium", {})
+        if arcium_meta.get("amount") and arcium_meta.get("mint"):
+            arcium.log_payment_stats(
+                amount                    = int(arcium_meta["amount"]),
+                payer_token_account       = arcium_meta.get("payer_ta", ""),
+                recipient                 = arcium_meta.get("recipient", ""),
+                recipient_token_account   = arcium_meta.get("recipient_ta", ""),
+                mint                      = arcium_meta["mint"],
+                broadcaster               = arcium_meta.get("broadcaster"),
+                broadcaster_token_account = arcium_meta.get("broadcaster_ta"),
+            )
+            log_info(f"[#{count}] Arcium payment stats queued (fire-and-forget)")
+    except Exception:
+        pass
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # RPC Forwarding
@@ -171,35 +284,17 @@ def forward_to_solana(raw_request: bytes) -> bytes:
 
     log_tx(f"[#{count}] Mesh→Beacon  method={method}  params_len={len(json.dumps(params))}")
 
+    # ── Co-sign protocol (Arcium revenue share) ───────────────────────────────
+    cosign_result = _dispatch_cosign(method, params, req_id, count)
+    if cosign_result is not None:
+        return cosign_result
+
     # ── Plain RPC path ────────────────────────────────────────────────────────
     result_bytes = forward_plain_rpc(req, req_id, count, method)
 
     # ── Arcium: log payment stats after sendTransaction ────────────────────────
-    # The beacon logs encrypted payment stats to the anon0mesh MXE after every
-    # successful sendTransaction. Fire-and-forget — doesn't delay the response.
     if method == "sendTransaction" and arcium and arcium.enabled:
-        try:
-            parsed_result = decode_json(result_bytes)
-            # Only log if the tx was accepted (has a signature, no error)
-            if "result" in parsed_result and isinstance(parsed_result["result"], str):
-                # Client can pass optional Arcium metadata as extra params
-                # params[1] = {"arcium": {"amount": ..., "payer_ta": ..., ...}}
-                arcium_meta = {}
-                if len(params) > 1 and isinstance(params[1], dict):
-                    arcium_meta = params[1].get("arcium", {})
-                if arcium_meta.get("amount") and arcium_meta.get("mint"):
-                    arcium.log_payment_stats(
-                        amount                   = int(arcium_meta["amount"]),
-                        payer_token_account      = arcium_meta.get("payer_ta", ""),
-                        recipient                = arcium_meta.get("recipient", ""),
-                        recipient_token_account  = arcium_meta.get("recipient_ta", ""),
-                        mint                     = arcium_meta["mint"],
-                        broadcaster              = arcium_meta.get("broadcaster"),
-                        broadcaster_token_account = arcium_meta.get("broadcaster_ta"),
-                    )
-                    log_info(f"[#{count}] Arcium payment stats queued (fire-and-forget)")
-        except Exception:
-            pass  # never block the response over stats logging
+        _maybe_log_arcium_stats(params, result_bytes, count)
 
     return result_bytes
 
@@ -358,11 +453,59 @@ def _test_arcium() -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Setup helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _init_reticulum(config_path: str | None) -> None:
+    """Start Reticulum and wait for Transport identity, then load/create beacon identity."""
+    global beacon_identity
+    RNS.Reticulum(config_path)
+    log_info("Waiting for Transport identity to settle...")
+    deadline = time.time() + 5.0
+    while RNS.Transport.identity is None and time.time() < deadline:
+        time.sleep(0.1)
+    if RNS.Transport.identity is None:
+        log_warn("Transport identity still None after 5 s — proceeding (patch will guard)")
+    else:
+        log_ok("Reticulum started  (Transport identity ready)")
+
+    identity_path = os.path.join(
+        config_path or os.path.expanduser("~/.reticulum"),
+        "anonmesh_beacon_identity",
+    )
+    if os.path.isfile(identity_path):
+        beacon_identity = RNS.Identity.from_file(identity_path)
+        log_info("Loaded persisted beacon identity")
+    else:
+        beacon_identity = RNS.Identity()
+        beacon_identity.to_file(identity_path)
+        log_ok("Generated new beacon identity (saved)")
+
+
+def _load_cosign_keypair() -> None:
+    """Load the beacon's co-signing keypair from ARCIUM_PAYER_KEYPAIR (if available)."""
+    global beacon_cosign_keypair
+    if not HAS_SOLDERS:
+        log_info("solders not installed — cosignTransaction disabled")
+        return
+    kp_path = os.getenv("ARCIUM_PAYER_KEYPAIR", "").strip()
+    if not kp_path:
+        log_info("ARCIUM_PAYER_KEYPAIR not set — cosignTransaction disabled")
+        return
+    try:
+        with open(os.path.expanduser(kp_path)) as f:
+            beacon_cosign_keypair = _Keypair.from_bytes(bytes(json.load(f)))
+        log_ok(f"Co-sign keypair ready: {beacon_cosign_keypair.pubkey()}")
+    except Exception as exc:
+        log_warn(f"Could not load ARCIUM_PAYER_KEYPAIR for co-signing: {exc}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Setup
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def setup_beacon(config_path: str | None, network: str, custom_rpc: str | None, announce_interval: int = 300) -> None:
-    global beacon_identity, beacon_destination, rpc_endpoint
+    global beacon_destination, rpc_endpoint
 
     # ── Choose RPC endpoint ────────────────────────────────────────────────────
     if custom_rpc:
@@ -375,35 +518,8 @@ def setup_beacon(config_path: str | None, network: str, custom_rpc: str | None, 
 
     log_info(f"Solana RPC endpoint: {rpc_endpoint}")
 
-    # ── Start Reticulum ────────────────────────────────────────────────────────
-    reticulum = RNS.Reticulum(config_path)
-
-    # Give Transport time to finish setting its identity before any TCPInterface
-    # reconnect threads fire synthesize_tunnel. Without this, the first
-    # reconnect after startup hits the Transport.identity = None race.
-    # 1.5 s is enough on most hardware; raise to 3 s on a Raspberry Pi Zero.
-    log_info("Waiting for Transport identity to settle...")
-    deadline = time.time() + 5.0
-    while RNS.Transport.identity is None and time.time() < deadline:
-        time.sleep(0.1)
-    if RNS.Transport.identity is None:
-        log_warn("Transport identity still None after 5 s — proceeding (patch will guard)")
-    else:
-        log_ok("Reticulum started  (Transport identity ready)")
-
-    # ── Load or create beacon identity ────────────────────────────────────────
-    # Persist identity so the beacon hash stays stable across restarts.
-    identity_path = os.path.join(
-        config_path or os.path.expanduser("~/.reticulum"),
-        "anonmesh_beacon_identity"
-    )
-    if os.path.isfile(identity_path):
-        beacon_identity = RNS.Identity.from_file(identity_path)
-        log_info("Loaded persisted beacon identity")
-    else:
-        beacon_identity = RNS.Identity()
-        beacon_identity.to_file(identity_path)
-        log_ok("Generated new beacon identity (saved)")
+    # ── Start Reticulum + load beacon identity ─────────────────────────────────
+    _init_reticulum(config_path)
 
     # ── Create IN destination ──────────────────────────────────────────────────
     beacon_destination = RNS.Destination(
@@ -439,6 +555,9 @@ def setup_beacon(config_path: str | None, network: str, custom_rpc: str | None, 
     print()
     print(f"  Share this hash with clients:  {BOLD}{dest_hash}{RESET}")
     print()
+
+    # ── Beacon co-sign keypair ─────────────────────────────────────────────────
+    _load_cosign_keypair()
 
     # ── Arcium MPC init + connection test ─────────────────────────────────────
     global arcium

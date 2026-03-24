@@ -65,7 +65,15 @@ SHIM_PATH              = Path(__file__).parent / "rescue_shim.mjs"
 
 # ── Shim helpers ───────────────────────────────────────────────────────────────
 
-def _run_shim(*args: str, timeout: int = 60) -> dict:
+def _run_shim(*args: str, stdin_data: str | None = None, timeout: int = 60) -> dict:
+    """
+    Run rescue_shim.mjs with the given CLI args.
+
+    Sensitive material (private keys, shared secrets) must be passed via
+    ``stdin_data`` so it never appears in the process argument list
+    (visible via /proc/<pid>/cmdline or ``ps aux``).
+    The shim reads from stdin when the first line of its stdin is non-empty.
+    """
     if not SHIM_PATH.exists():
         raise FileNotFoundError(
             f"rescue_shim.mjs not found at {SHIM_PATH}\n"
@@ -73,16 +81,17 @@ def _run_shim(*args: str, timeout: int = 60) -> dict:
         )
     result = subprocess.run(
         ["node", str(SHIM_PATH), *args],
+        input=stdin_data,
         capture_output=True, text=True, timeout=timeout,
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"shim stderr: {result.stderr.strip()}")
+    # shim writes errors as JSON to stdout (fail() uses console.log), not stderr
     try:
         data = json.loads(result.stdout)
     except json.JSONDecodeError:
-        raise RuntimeError(f"shim non-JSON: {result.stdout[:300]}")
+        raw = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(f"shim non-JSON output (exit {result.returncode}): {raw[:300]}")
     if not data.get("ok"):
-        raise RuntimeError(f"shim error: {data.get('error', 'unknown')}")
+        raise RuntimeError(data.get("error") or f"shim error (exit {result.returncode})")
     return data
 
 
@@ -99,12 +108,14 @@ def rescue_encrypt(mxe_pubkey_hex: str, values: list[int], nonce_hex: str | None
 
 
 def rescue_decrypt(shared_secret_hex: str, ciphertexts: list[list[int]], nonce_hex: str) -> list[int]:
-    data = _run_shim("decrypt", shared_secret_hex, json.dumps(ciphertexts), nonce_hex)
+    # shared_secret_hex is sensitive — pass via stdin, not as a CLI arg
+    data = _run_shim("decrypt", json.dumps(ciphertexts), nonce_hex, stdin_data=shared_secret_hex)
     return [int(v) for v in data["values"]]
 
 
 def rescue_shared_secret(privkey_hex: str, mxe_pubkey_hex: str) -> str:
-    return _run_shim("shared_secret", privkey_hex, mxe_pubkey_hex)["shared_secret_hex"]
+    # privkey_hex is sensitive — pass via stdin, not as a CLI arg
+    return _run_shim("shared_secret", mxe_pubkey_hex, stdin_data=privkey_hex)["shared_secret_hex"]
 
 
 # ── ArciumBeaconClient ─────────────────────────────────────────────────────────
@@ -189,7 +200,9 @@ class ArciumBeaconClient:
         })
 
         try:
-            result = _run_shim("execute_payment", shim_args, timeout=60)
+            # shim_args contains payerKeypairHex — pass via stdin to keep it
+            # out of the process argument list (/proc/<pid>/cmdline / ps aux)
+            result = _run_shim("execute_payment", stdin_data=shim_args, timeout=60)
             log_ok(f"Payment stats logged  sig={result['signature'][:20]}...")
             return {"status": "ok", "signature": result["signature"]}
         except Exception as exc:

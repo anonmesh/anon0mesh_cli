@@ -18,6 +18,13 @@ import {
     getFeePoolAccAddress, getMempoolAccAddress, getMXEAccAddress,
 } from "@arcium-hq/client";
 import { randomBytes, createHash } from "crypto";
+import { readFileSync } from "node:fs";
+
+// Read all of stdin synchronously — used for sensitive values (keys, secrets)
+// that must not appear in the process argument list (ps aux / /proc/pid/cmdline).
+function readStdin() {
+    try { return readFileSync(0, "utf8").trim(); } catch { return ""; }
+}
 
 const [,, cmd, ...args] = process.argv;
 
@@ -80,9 +87,11 @@ try {
         });
 
     } else if (cmd === "decrypt") {
-        const [sharedSecretHex, ciphertextsJson, nonceHex] = args;
+        // shared_secret_hex is passed via stdin to keep it out of the process arg list
+        const sharedSecretHex = readStdin();
+        const [ciphertextsJson, nonceHex] = args;
         if (!sharedSecretHex || !ciphertextsJson || !nonceHex)
-            fail("usage: decrypt <shared_secret_hex> <ciphertexts_json> <nonce_hex>");
+            fail("usage: decrypt <ciphertexts_json> <nonce_hex>  (shared_secret_hex via stdin)");
 
         const sharedSecret = u8a(sharedSecretHex);
         const ciphertexts  = JSON.parse(ciphertextsJson).map(ct => Uint8Array.from(ct));
@@ -92,8 +101,10 @@ try {
         out({ values: plaintext.map(v => v.toString()) });
 
     } else if (cmd === "shared_secret") {
-        const [privkeyHex, mxePubkeyHex] = args;
-        if (!privkeyHex || !mxePubkeyHex) fail("usage: shared_secret <privkey_hex> <mxe_pubkey_hex>");
+        // privkeyHex is passed via stdin to keep it out of the process arg list
+        const privkeyHex = readStdin();
+        const [mxePubkeyHex] = args;
+        if (!privkeyHex || !mxePubkeyHex) fail("usage: shared_secret <mxe_pubkey_hex>  (privkey_hex via stdin)");
         const sharedSecret = x25519.getSharedSecret(u8a(privkeyHex), u8a(mxePubkeyHex));
         out({ shared_secret_hex: hex(sharedSecret) });
 
@@ -150,16 +161,16 @@ try {
         // Called by the beacon AFTER successfully relaying a sendTransaction,
         // to log encrypted payment statistics via Arcium MPC.
         //
-        // Args JSON: {
+        // Args JSON passed via stdin (contains payerKeypairHex — kept off arg list):
+        // {
         //   rpcUrl, programId?, payerKeypairHex, clusterOffset?,
         //   amount, pubKeyHex, nonceBn,
-        //   -- token accounts for the payment --
         //   recipientB58, mintB58,
         //   payerTokenAccountB58, recipientTokenAccountB58,
         //   broadcasterB58?, broadcasterKeypairHex?, broadcasterTokenAccountB58?
         // }
-        const argsJson = args[0];
-        if (!argsJson) fail("usage: execute_payment <json>");
+        const argsJson = readStdin();
+        if (!argsJson) fail("usage: execute_payment  (json via stdin)");
 
         const p = JSON.parse(argsJson);
         const {
