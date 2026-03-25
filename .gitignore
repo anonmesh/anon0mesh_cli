@@ -5,3 +5,6 @@ reticulum_config/
 .env
 run_beacon.sh
 run_client.sh
+wallet.json
+wallet_*.json
+nonce_*.json

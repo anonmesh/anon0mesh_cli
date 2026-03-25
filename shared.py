@@ -86,7 +86,7 @@ def banner(role: str) -> None:
  ██╔══██║██║╚██╗██║██║   ██║██║╚██╗██║██║╚██╔╝██║██╔══╝  ╚════██║██╔══██║
  ██║  ██║██║ ╚████║╚██████╔╝██║ ╚████║██║ ╚═╝ ██║███████╗███████║██║  ██║
  ╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝     ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝
-{RESET}{BOLD} Mesh First, Chain When It Matters  ·  {role}  ·  Powered by Reticulum{RESET}
+{RESET}{BOLD} Mesh First, Chain When It Matters  ·  {role}  ·  Powered by Reticulum && Solana {RESET}
 """)
 
 

@@ -1,21 +1,16 @@
 """
 menu.py — interactive menu REPL
 =================================
-All _do_* action handlers, the menu section table, and the REPL loop.
-
-To add a new command:
-  1. Write a _do_<name>() function below.
-  2. Add it to _MENU_SECTIONS in the right section.
+To add a command:
+  1. Write a _do_<name>() function.
+  2. Add an entry to MENU at the bottom.
 """
 
 import io
+import sys
 import json
 import threading
 
-_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-_spinner_idx    = 0
-
-import sys
 import state
 from shared import (
     log_info, log_ok, log_warn, log_err,
@@ -36,14 +31,18 @@ from wallet import (
     scan_nonce_accounts, HAS_SOLDERS,
 )
 
-_RELAY_PROMPT      = "  Relay now? [y/N]: "
+_RELAY_PROMPT      = "Relay now? [y/N]"
 _MAX_RETRIES       = 3
 _NEED_SOLDERS      = "Requires: pip install solders"
 _PROMPT_TO         = "Recipient address"
 _PROMPT_AMOUNT     = "Amount  (SOL, e.g. 0.5)"
 _PROMPT_NONCE_ACCT = "Nonce account pubkey"
 _INVALID_AMOUNT    = "Invalid amount"
-_NO_WALLET         = "No wallet loaded — use WALLET → Generate or Import first"
+_NO_WALLET         = "No wallet loaded — use WALLET › Generate or Import first"
+
+_W              = 56       # visible width of section fill
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_spinner_idx    = 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -51,7 +50,6 @@ _NO_WALLET         = "No wallet loaded — use WALLET → Generate or Import fir
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _ask(prompt: str) -> str:
-    """Prompt for a single line. Returns '' on empty or Ctrl-C."""
     try:
         return input(f"  {CYAN}›{RESET} {prompt}: ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -59,22 +57,8 @@ def _ask(prompt: str) -> str:
         return ""
 
 
-def _ask_int(prompt: str) -> int | None:
-    raw = _ask(prompt)
-    if not raw:
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        log_warn("Expected an integer")
-        return None
-
-
 def _pick(prompt: str, options: list[str]) -> int | None:
-    """
-    Display a numbered list and return the 0-based index of the chosen item.
-    Auto-selects if only one option. Returns None on cancel.
-    """
+    """Numbered list picker. Auto-selects when only one option. Returns 0-based index."""
     if not options:
         return None
     if len(options) == 1:
@@ -99,44 +83,41 @@ def _pick(prompt: str, options: list[str]) -> int | None:
 
 
 class _Spinner:
-    """Inline spinner that overwrites the same line without polluting scroll history."""
+    """Overwrites a single terminal line with a spinning status indicator."""
     _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
     def __init__(self, label: str):
-        self._label = label
-        self._idx   = 0
-        self._active = False
+        self._label  = label
+        self._idx    = 0
 
     def __enter__(self):
-        self._active = True
         set_quiet(True)
-        self._tick()
+        self._draw()
         return self
 
     def tick(self, label: str | None = None):
         if label:
             self._label = label
-        self._tick()
+        self._draw()
 
-    def _tick(self):
+    def _draw(self):
         frame = self._FRAMES[self._idx % len(self._FRAMES)]
         self._idx += 1
-        sys.stdout.write(f"\r  {YELLOW}{frame}{RESET} {self._label}  ")
+        sys.stdout.write(f"\r  {YELLOW}{frame}{RESET} {self._label}   ")
         sys.stdout.flush()
 
     def done(self, msg: str, ok: bool = True):
         col = GREEN if ok else RED
         sym = "✔" if ok else "✘"
-        sys.stdout.write(f"\r  {col}{sym}{RESET} {msg}\n")
+        sys.stdout.write(f"\r  {col}{BOLD}{sym}{RESET} {msg}\n")
         sys.stdout.flush()
 
     def __exit__(self, *_):
-        self._active = False
         set_quiet(False)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Action handlers — one per menu item
+# Action handlers
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _do_generate_wallet():
@@ -161,6 +142,40 @@ def _do_import_wallet():
     if not path:
         return
     import_wallet(raw, path)
+
+
+def _copy_to_clipboard(text: str) -> bool:
+    """Try xclip → xsel → wl-copy → pyperclip. Returns True on success."""
+    import subprocess
+    for cmd in (
+        ["xclip", "-selection", "clipboard"],
+        ["xsel", "--clipboard", "--input"],
+        ["wl-copy"],
+    ):
+        try:
+            subprocess.run(cmd, input=text, text=True, check=True,
+                           capture_output=True, timeout=3)
+            return True
+        except (FileNotFoundError, subprocess.CalledProcessError,
+                subprocess.TimeoutExpired):
+            continue
+    try:
+        import pyperclip
+        pyperclip.copy(text)
+        return True
+    except Exception:
+        return False
+
+
+def _do_copy_pubkey():
+    if not state.active_wallet:
+        log_warn(_NO_WALLET); return
+    pk = state.active_wallet["pubkey"]
+    if _copy_to_clipboard(pk):
+        log_ok(f"Copied  {pk}")
+    else:
+        print(f"\n  {BOLD}{GREEN}{pk}{RESET}\n")
+        log_warn("Clipboard unavailable — key printed above (install xclip or pyperclip)")
 
 
 def _do_balance():
@@ -193,23 +208,47 @@ def _do_txcount():   get_transaction_count()
 def _do_blockhash(): get_recent_blockhash()
 
 
-# ── Simple send ────────────────────────────────────────────────────────────────
+# ── Send ───────────────────────────────────────────────────────────────────────
+
+def _fetch_balance_sol(pubkey: str) -> float | None:
+    resp = rpc_call("getBalance", [pubkey])
+    if not (resp and "result" in resp):
+        return None
+    lamps = resp["result"]
+    if isinstance(lamps, dict):
+        lamps = lamps.get("value", 0)
+    return lamps / 1_000_000_000
+
 
 def _select_nonce_account() -> str | None:
-    """Pick a nonce account pubkey: auto-detect nonce_*.json files, else prompt."""
+    """Pick a nonce account with live SOL balance shown for each candidate."""
+    import concurrent.futures
+
     found = scan_nonce_accounts()
-    if found:
-        labels = [f"{n['pubkey'][:8]}…{n['pubkey'][-4:]}  {DIM}{n['path']}{RESET}" for n in found]
-        idx = _pick("Select nonce account", labels)
-        if idx is None:
-            return None
-        return found[idx]["pubkey"]
-    pubkey = _ask(_PROMPT_NONCE_ACCT)
-    return pubkey or None
+    if not found:
+        return _ask(_PROMPT_NONCE_ACCT) or None
+
+    with _Spinner("Fetching balances…") as sp:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(found)) as ex:
+            futs = {ex.submit(_fetch_balance_sol, n["pubkey"]): n["pubkey"] for n in found}
+            bals = {pk: fut.result() for fut, pk in
+                    ((f, futs[f]) for f in concurrent.futures.as_completed(futs))}
+        sp.done(f"{len(found)} nonce account(s)")
+
+    labels = []
+    for n in found:
+        bal = bals.get(n["pubkey"])
+        bal_str = (f"  {GREEN}{bal:.9f} SOL{RESET}" if bal is not None
+                   else f"  {DIM}balance unknown{RESET}")
+        labels.append(
+            f"{n['pubkey'][:8]}…{n['pubkey'][-4:]}  {DIM}{n['path']}{RESET}{bal_str}"
+        )
+
+    idx = _pick("Select nonce account", labels)
+    return found[idx]["pubkey"] if idx is not None else None
 
 
 def _do_send_sol():
-    """SOL send via durable nonce: sign once, relay via beacon, auto-retry broadcast."""
     if not HAS_SOLDERS:
         log_err(_NEED_SOLDERS); return
     if not state.active_wallet:
@@ -229,7 +268,6 @@ def _do_send_sol():
 
     to = _ask(_PROMPT_TO)
     if not to: return
-
     raw = _ask(_PROMPT_AMOUNT)
     if not raw: return
     try:
@@ -242,29 +280,26 @@ def _do_send_sol():
     tx_b64 = offline_sign_nonce_transfer(
         kp_path, nonce_pubkey, kp_path, to, lamports, nonce_info["nonce"]
     )
-    if not tx_b64: return
-
-    _broadcast_with_retry(tx_b64)
+    if tx_b64:
+        _broadcast_with_retry(tx_b64)
 
 
 def _broadcast_with_retry(tx_b64: str) -> None:
-    """Relay a signed tx, retrying up to _MAX_RETRIES times. Sign only once — nonce never expires."""
     with _Spinner("Broadcasting…") as sp:
         for attempt in range(1, _MAX_RETRIES + 1):
             if attempt > 1:
                 sp.tick(f"Retry {attempt}/{_MAX_RETRIES}…")
             resp = rpc_call("sendTransaction", [tx_b64, {"encoding": "base64"}])
             if resp and "result" in resp:
-                sp.done(f"Confirmed — sig: {resp['result'][:20]}…")
-                print(f"\n  {GREEN}{BOLD}Signature: {resp['result']}{RESET}\n")
+                sp.done(f"Confirmed  sig: {resp['result'][:20]}…")
+                print(f"\n  {GREEN}{BOLD}Signature:{RESET} {resp['result']}\n")
                 return
             err = resp.get("error", {}).get("message", "no response") if resp else "no response"
-            sp.tick(f"Attempt {attempt} failed: {err[:40]}")
+            sp.tick(f"Attempt {attempt} failed: {err[:50]}")
         sp.done("All broadcast attempts failed", ok=False)
 
 
 def _do_arcium_transfer():
-    """Arcium-secured SOL transfer: durable nonce + mandatory beacon co-signature."""
     if not HAS_SOLDERS:
         log_err(_NEED_SOLDERS); return
     if not state.active_wallet:
@@ -273,14 +308,14 @@ def _do_arcium_transfer():
     kp_path = state.active_wallet["path"]
     pubkey  = state.active_wallet["pubkey"]
 
-    print(f"\n  {BOLD}From:{RESET} {pubkey}")
+    print(f"\n  {BOLD}From:{RESET} {GREEN}{pubkey}{RESET}")
     get_balance(pubkey)
 
     nonce = _select_nonce_account()
     if not nonce: return
-    to    = _ask(_PROMPT_TO)
+    to = _ask(_PROMPT_TO)
     if not to: return
-    raw   = _ask(_PROMPT_AMOUNT)
+    raw = _ask(_PROMPT_AMOUNT)
     if not raw: return
     try:
         lamports = int(float(raw) * 1_000_000_000)
@@ -288,46 +323,30 @@ def _do_arcium_transfer():
         log_warn(_INVALID_AMOUNT); return
     if lamports <= 0:
         log_warn("Amount must be greater than 0"); return
-    nval  = None  # always fetch from chain — ensures fresh nonce
 
-    log_info("Fetching beacon co-signing pubkey...")
+    log_info("Fetching beacon co-signing pubkey…")
     beacon_pk = get_beacon_pubkey()
     if not beacon_pk:
         log_err("Could not get beacon pubkey — is ARCIUM_PAYER_KEYPAIR set on the beacon?")
         return
     log_ok(f"Beacon: {beacon_pk}")
 
-    partial_tx = partial_sign_arcium_transfer(
-        kp_path, beacon_pk, nonce, to, lamports, nval or None
-    )
+    partial_tx = partial_sign_arcium_transfer(kp_path, beacon_pk, nonce, to, lamports)
     if partial_tx:
         cosign_and_send(partial_tx)
 
 
-# ── Advanced ───────────────────────────────────────────────────────────────────
-
-def _do_relay_raw():
-    tx = _ask("Signed transaction (base64)")
-    if tx:
-        send_transaction(tx)
-
-
-def _do_simulate():
-    tx = _ask("Signed transaction (base64)")
-    if tx:
-        simulate_transaction(tx)
-
+# ── Durable nonce ──────────────────────────────────────────────────────────────
 
 def _do_create_nonce():
     if not state.active_wallet:
         log_warn(_NO_WALLET); return
-    kp       = state.active_wallet["path"]
     nonce_kp = _ask("Nonce keypair JSON path  (blank = generate new)")
-    create_nonce_account(kp, nonce_kp or None, None)
+    create_nonce_account(state.active_wallet["path"], nonce_kp or None, None)
 
 
 def _do_get_nonce():
-    pubkey = _ask(_PROMPT_NONCE_ACCT)
+    pubkey = _select_nonce_account()
     if pubkey:
         get_nonce_account(pubkey)
 
@@ -335,7 +354,7 @@ def _do_get_nonce():
 def _do_sign_nonce():
     kp    = _ask("Payer keypair JSON path")
     if not kp: return
-    nonce = _ask(_PROMPT_NONCE_ACCT)
+    nonce = _select_nonce_account()
     if not nonce: return
     auth  = _ask("Authority keypair JSON path  (blank = use payer)")
     to    = _ask(_PROMPT_TO)
@@ -346,11 +365,13 @@ def _do_sign_nonce():
         lamps = int(float(raw) * 1_000_000_000)
     except ValueError:
         log_warn(_INVALID_AMOUNT); return
-    nval  = _ask("Nonce value  (blank = fetch from chain)")
+    nval   = _ask("Nonce value  (blank = fetch from chain)")
     tx_b64 = offline_sign_nonce_transfer(kp, nonce, auth or kp, to, lamps, nval or None)
-    if tx_b64 and input(f"  {CYAN}›{RESET} {_RELAY_PROMPT}").strip().lower() == "y":
+    if tx_b64 and _ask(_RELAY_PROMPT).lower() == "y":
         send_transaction(tx_b64)
 
+
+# ── Beacon pool ────────────────────────────────────────────────────────────────
 
 def _do_beacons():
     print(state.pool.status_table())
@@ -362,7 +383,7 @@ def _do_add():
         threading.Thread(
             target=state.pool.add,
             args=(h,),
-            kwargs={"label": f"manual:{h[:12]}...", "connect": True},
+            kwargs={"label": f"manual:{h[:12]}…", "connect": True},
             daemon=True,
         ).start()
 
@@ -382,6 +403,20 @@ def _do_strategy():
         log_warn("Use 'race' or 'fallback'")
 
 
+# ── Advanced ───────────────────────────────────────────────────────────────────
+
+def _do_relay_raw():
+    tx = _ask("Signed transaction (base64)")
+    if tx:
+        send_transaction(tx)
+
+
+def _do_simulate():
+    tx = _ask("Signed transaction (base64)")
+    if tx:
+        simulate_transaction(tx)
+
+
 def _do_raw():
     method = _ask("RPC method  (e.g. getSlot)")
     if not method: return
@@ -396,54 +431,45 @@ def _do_raw():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Menu definition
-# ═══════════════════════════════════════════════════════════════════════════════
-# Each section: (title, [(label, handler), ...])
-# To add a command: write a handler above, then add it here.
+# Menu definition  —  flat array, one dict per item
+_SEC_WALLET  = "WALLET"
+_SEC_SEND    = "SEND"
+_SEC_NONCE   = "DURABLE NONCE"
+_SEC_NETWORK = "NETWORK"
+_SEC_BEACON  = "BEACON POOL"
+_SEC_ADV     = "ADVANCED"
 
-_MENU_SECTIONS: list[tuple[str, list[tuple[str, callable]]]] = [
-    ("WALLET", [
-        ("Generate new wallet",                   _do_generate_wallet),
-        ("Import private key",                    _do_import_wallet),
-        ("SOL balance",                           _do_balance),
-        ("SOL balance  (confidential · Arcium)",  _do_cbalance),
-        ("SPL token accounts",                    _do_tokens),
-    ]),
-    ("SEND", [
-        ("Send SOL",                              _do_send_sol),
-        ("Arcium payment  (beacon co-sign)",      _do_arcium_transfer),
-    ]),
-    ("DURABLE NONCE", [
-        ("Create nonce account",                  _do_create_nonce),
-        ("View nonce value",                      _do_get_nonce),
-        ("Sign transfer with nonce",              _do_sign_nonce),
-    ]),
-    ("NETWORK", [
-        ("Current slot",                          _do_slot),
-        ("Block height",                          _do_height),
-        ("Latest blockhash",                      _do_blockhash),
-        ("Transaction count",                     _do_txcount),
-    ]),
-    ("BEACON POOL", [
-        ("View pool status",                      _do_beacons),
-        ("Add beacon",                            _do_add),
-        ("Remove beacon",                         _do_remove),
-        ("Switch dispatch strategy",              _do_strategy),
-    ]),
-    ("ADVANCED", [
-        ("Relay raw transaction  (base64)",       _do_relay_raw),
-        ("Simulate transaction",                  _do_simulate),
-        ("Raw JSON-RPC call",                     _do_raw),
-    ]),
+# Flat array — one dict per item. Keys: section (str), label (str), fn (callable).
+# Numbers are auto-assigned in display order; add/remove items freely.
+MENU: list[dict] = [
+    {"section": _SEC_WALLET,  "label": "Generate new wallet",                  "fn": _do_generate_wallet},
+    {"section": _SEC_WALLET,  "label": "Import private key",                   "fn": _do_import_wallet},
+    {"section": _SEC_WALLET,  "label": "Copy public key",                      "fn": _do_copy_pubkey},
+    {"section": _SEC_WALLET,  "label": "SOL balance",                          "fn": _do_balance},
+    {"section": _SEC_WALLET,  "label": "SOL balance  (confidential · Arcium)", "fn": _do_cbalance},
+    {"section": _SEC_WALLET,  "label": "SPL token accounts",                   "fn": _do_tokens},
+    {"section": _SEC_SEND,    "label": "Send SOL",                             "fn": _do_send_sol},
+    {"section": _SEC_SEND,    "label": "Arcium payment  (beacon co-sign)",     "fn": _do_arcium_transfer},
+    {"section": _SEC_NONCE,   "label": "Create nonce account",                 "fn": _do_create_nonce},
+    {"section": _SEC_NONCE,   "label": "View nonce value",                     "fn": _do_get_nonce},
+    {"section": _SEC_NONCE,   "label": "Sign transfer with nonce",             "fn": _do_sign_nonce},
+    {"section": _SEC_NETWORK, "label": "Current slot",                         "fn": _do_slot},
+    {"section": _SEC_NETWORK, "label": "Block height",                         "fn": _do_height},
+    {"section": _SEC_NETWORK, "label": "Latest blockhash",                     "fn": _do_blockhash},
+    {"section": _SEC_NETWORK, "label": "Transaction count",                    "fn": _do_txcount},
+    {"section": _SEC_BEACON,  "label": "View pool status",                     "fn": _do_beacons},
+    {"section": _SEC_BEACON,  "label": "Add beacon",                           "fn": _do_add},
+    {"section": _SEC_BEACON,  "label": "Remove beacon",                        "fn": _do_remove},
+    {"section": _SEC_BEACON,  "label": "Switch dispatch strategy",             "fn": _do_strategy},
+    {"section": _SEC_ADV,     "label": "Relay raw transaction  (base64)",      "fn": _do_relay_raw},
+    {"section": _SEC_ADV,     "label": "Simulate transaction",                 "fn": _do_simulate},
+    {"section": _SEC_ADV,     "label": "Raw JSON-RPC call",                    "fn": _do_raw},
 ]
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Menu renderer
-# ═══════════════════════════════════════════════════════════════════════════════
+# Renderer
 
 def _wallet_qr_lines(pubkey: str) -> list[str]:
-    """Render a pubkey as terminal QR code lines. Returns [] if qrcode not installed."""
     try:
         import qrcode as _qr
         qr = _qr.QRCode(border=1, error_correction=_qr.constants.ERROR_CORRECT_L)
@@ -456,62 +482,73 @@ def _wallet_qr_lines(pubkey: str) -> list[str]:
         return []
 
 
-def _render_menu() -> dict[str, callable]:
-    """
-    Print the full menu and return {number_string: handler}.
-    Called at the start of every loop iteration so beacon status stays live.
-    """
+def _render_header() -> None:
+    global _spinner_idx
     n_active  = len(state.pool.active_links())
     n_pending = state.pool.pending_count()
 
     if n_active > 0:
-        active_col = GREEN
+        dot_col = GREEN
     elif n_pending > 0:
-        active_col = YELLOW
+        dot_col = YELLOW
     else:
-        active_col = RED
-    global _spinner_idx
-    active_str = f"{active_col}●{RESET} {BOLD}{n_active}{RESET} active"
+        dot_col = RED
+
+    beacon_str = f"{dot_col}●{RESET} {BOLD}{n_active}{RESET} active"
     if n_pending > 0:
         frame       = _SPINNER_FRAMES[_spinner_idx % len(_SPINNER_FRAMES)]
         _spinner_idx += 1
-        pending_str = f"  {YELLOW}{frame}{RESET} {n_pending} connecting"
-    else:
-        pending_str = ""
+        beacon_str += f"  {YELLOW}{frame}{RESET} {n_pending} connecting"
+    beacon_str += f"  {DIM}·  {state.pool.strategy}{RESET}"
 
-    print()
-    print(f"{BOLD}{CYAN}  ┌─ anon0mesh ─────────────────────────────────────────┐{RESET}")
-    print(f"{BOLD}{CYAN}  │{RESET}  {active_str}{pending_str}  {DIM}·  strategy: {state.pool.strategy}{RESET}")
-    print(f"{BOLD}{CYAN}  └─────────────────────────────────────────────────────┘{RESET}")
+    bar = f"  {CYAN}{'═' * (_W + 2)}{RESET}"
+    print(f"\n{bar}")
+    print(f"  {BOLD}anon0mesh{RESET}  {DIM}mesh-first solana rpc{RESET}")
+    print(f"  {beacon_str}")
 
     if state.active_wallet:
-        qr_lines = _wallet_qr_lines(state.active_wallet["pubkey"])
-        if qr_lines:
+        pk    = state.active_wallet["pubkey"]
+        short = f"{pk[:8]}…{pk[-8:]}"
+        path  = state.active_wallet["path"]
+        print(f"  {GREEN}◆{RESET}  {BOLD}{short}{RESET}  {DIM}{path}{RESET}")
+
+    print(bar)
+
+    if state.active_wallet:
+        qr = _wallet_qr_lines(state.active_wallet["pubkey"])
+        if qr:
             print()
-            for line in qr_lines:
+            for line in qr:
                 print(f"  {line}")
-        print(f"\n  {BOLD}{GREEN}{state.active_wallet['pubkey']}{RESET}")
-        print(f"  {DIM}{state.active_wallet['path']}{RESET}")
+
+
+def _section_header(title: str) -> None:
+    fill = "─" * (_W - len(title) - 1)
+    print(f"\n  {BOLD}{title}{RESET}  {DIM}{fill}{RESET}")
+
+
+def _render_menu() -> dict[str, callable]:
+    _render_header()
 
     mapping: dict[str, callable] = {}
-    idx = 1
+    current_section = None
 
-    for section_title, items in _MENU_SECTIONS:
-        print(f"\n  {DIM}── {section_title} {'─' * (44 - len(section_title))}{RESET}")
-        for label, handler in items:
-            num = str(idx)
-            print(f"  {CYAN}{BOLD}{num:>2}{RESET}  {label}")
-            mapping[num] = handler
-            idx += 1
+    for num, item in enumerate(MENU, 1):
+        if item["section"] != current_section:
+            current_section = item["section"]
+            _section_header(current_section)
 
-    print(f"\n  {DIM}────────────────────────────────────────────────{RESET}")
-    print(f"  {CYAN}{BOLD} 0{RESET}  Quit    {DIM}c  Clear screen{RESET}\n")
+        key = str(num)
+        print(f"  {CYAN}{BOLD}{num:>3}{RESET}  {item['label']}")
+        mapping[key] = item["fn"]
+
+    print(f"\n  {DIM}{'─' * (_W + 2)}{RESET}")
+    print(f"  {CYAN}{BOLD}  0{RESET}  Quit"
+          f"   {DIM}m  Refresh menu   c  Clear screen{RESET}\n")
     return mapping
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# REPL loop
-# ═══════════════════════════════════════════════════════════════════════════════
+# REPL
 
 def _run_handler(handler: callable) -> None:
     print()
@@ -523,11 +560,10 @@ def _run_handler(handler: callable) -> None:
 
 
 def _read_choice() -> str | None:
-    """Return the user's input, or None on EOF/Ctrl-C (signals exit)."""
     n   = len(state.pool.active_links())
     col = GREEN if n > 0 else RED
     try:
-        return input(f"  {col}select ›{RESET} ").strip()
+        return input(f"  {col}›{RESET} ").strip()
     except (EOFError, KeyboardInterrupt):
         print()
         return None
@@ -554,4 +590,4 @@ def repl() -> None:
         if handler:
             _run_handler(handler)
         else:
-            log_warn(f"  '{choice}' is not a valid option")
+            log_warn(f"'{choice}' is not a valid option")

@@ -420,7 +420,7 @@ def create_nonce_account(
     ))
     init_ix = initialize_nonce_account(InitializeNonceAccountParams(
         nonce_pubkey=nonce_pubkey,
-        authorized_pubkey=authority_pubkey,
+        authority=authority_pubkey,
     ))
 
     bh  = Hash.from_string(blockhash)

@@ -326,3 +326,28 @@ def test_partial_sign_arcium_transfer_invalid_address(tmp_path, capsys):
     )
     assert result is None
     assert "Invalid address" in capsys.readouterr().out
+
+
+# ── create_nonce_account (instruction build) ──────────────────────────────────
+
+def test_create_nonce_account_authority_param_name(tmp_path, monkeypatch):
+    """
+    Regression: InitializeNonceAccountParams uses 'authority', not 'authorized_pubkey'.
+    Mock out RPC calls and verify the instruction builds without ValueError.
+    """
+    from unittest.mock import patch, MagicMock
+    _write_keypair(tmp_path / "payer.json")
+
+    mock_rpc = MagicMock()
+    mock_rpc.return_value = {"result": 1_447_680}          # rent
+    mock_blockhash = MagicMock(return_value="4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi")
+    mock_send = MagicMock(return_value={"result": "SIG"})
+
+    with patch("wallet.rpc_call", mock_rpc), \
+         patch("wallet.get_recent_blockhash", mock_blockhash), \
+         patch("wallet.rpc_call", mock_send):
+        # The call must not raise ValueError: Missing required key: authority
+        try:
+            wallet.create_nonce_account(str(tmp_path / "payer.json"), None, None)
+        except ValueError as e:
+            pytest.fail(f"InitializeNonceAccountParams raised ValueError: {e}")
