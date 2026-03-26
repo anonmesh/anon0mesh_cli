@@ -29,8 +29,13 @@ function readStdin() {
 const [,, cmd, ...args] = process.argv;
 
 // ── Constants from the real contract ──────────────────────────────────────────
-// declare_id!("7fvHNYVuZP6EYt68GLUa4kU8f8dCBSaGafL9aDhhtMZN")
-const MXE_PROGRAM_ID = "7fvHNYVuZP6EYt68GLUa4kU8f8dCBSaGafL9aDhhtMZN";
+// From arcium_mxe.json IDL "address" field (the deployed ble_revshare program)
+const MXE_PROGRAM_ID = "7xeQNUggKc2e5q6AQxsFBLBkXGg2p54kSx11zVainMks";
+
+// Arcium core framework program — passed as the `arcium_program` account in
+// every execute_payment instruction (CPI target for queue_computation).
+// Source: arcium_mxe.json IDL accounts[].address for "arcium_program"
+const ARCIUM_PROGRAM_ID = "Arcj82pX7HxYKLR92qvgZUAd7vGS1k4hQvAFcPATFdEQ";
 
 // Hardcoded in contract:
 // const ARCIUM_SIGNER_PDA: Pubkey = Pubkey::new_from_array([...])
@@ -203,8 +208,8 @@ try {
         const progPubkey    = new PublicKey(programId);
         const clusterOffset = parseInt(clusterOffStr || "456");
 
-        // Random computation offset
-        const compOffsetBN  = new anchor.BN(Date.now());
+        // Random 8-byte computation offset (matches docs: new anchor.BN(randomBytes(8), "hex"))
+        const compOffsetBN  = new anchor.BN(randomBytes(8), "hex");
         const compDefOffset = Buffer.from(getCompDefAccOffset(COMP_DEF_NAME)).readUInt32LE();
 
         // PDAs — exact match to getArciumAccounts() in the hook
@@ -265,7 +270,9 @@ try {
             { pubkey: clockAccount,      isSigner: false,        isWritable: true  },
             { pubkey: TOKEN_PROGRAM_ID,  isSigner: false,        isWritable: false },
             { pubkey: SystemProgram.programId, isSigner: false,  isWritable: false },
-            { pubkey: progPubkey,        isSigner: false,        isWritable: false }, // arcium_program
+            // arcium_program is the Arcium core framework program (not the MXE program).
+            // Source: arcium_mxe.json IDL accounts[].address for "arcium_program"
+            { pubkey: new PublicKey(ARCIUM_PROGRAM_ID), isSigner: false, isWritable: false },
         ];
 
         const ix  = new TransactionInstruction({ keys, programId: progPubkey, data: ix_data });

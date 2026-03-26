@@ -50,8 +50,12 @@ except ImportError:
 from shared import log_info, log_ok, log_warn, log_err
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-# From declare_id! in the contract
-MXE_PROGRAM_ID         = "7fvHNYVuZP6EYt68GLUa4kU8f8dCBSaGafL9aDhhtMZN"
+# From arcium_mxe.json IDL "address" field — the deployed ble_revshare program
+MXE_PROGRAM_ID         = "7xeQNUggKc2e5q6AQxsFBLBkXGg2p54kSx11zVainMks"
+
+# Arcium core framework program — the `arcium_program` account in every
+# execute_payment instruction. Source: arcium_mxe.json IDL "arcium_program" address.
+ARCIUM_PROGRAM_ID      = "Arcj82pX7HxYKLR92qvgZUAd7vGS1k4hQvAFcPATFdEQ"
 
 # Hardcoded in the contract as ARCIUM_SIGNER_PDA
 ARCIUM_SIGNER_PDA      = "nhy7kthZGJjV3yqbyPuSeo2KhNriia4DQrii8jW3KcC"
