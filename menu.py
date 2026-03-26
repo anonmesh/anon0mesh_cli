@@ -306,12 +306,7 @@ def _do_arcium_transfer():
     if not state.active_wallet:
         log_warn(_NO_WALLET); return
 
-    # Required env config — must be set before running
-    mint           = os.getenv("ARCIUM_MINT", "").strip()
     mxe_pubkey_hex = os.getenv("ARCIUM_MXE_PUBKEY_HEX", "").strip()
-    if not mint:
-        log_err("ARCIUM_MINT not set in .env  (SPL mint for the whitelisted token)")
-        return
     if not mxe_pubkey_hex:
         log_err("ARCIUM_MXE_PUBKEY_HEX not set in .env  (run: node rescue_shim.mjs mxe_pubkey)")
         return
@@ -325,11 +320,11 @@ def _do_arcium_transfer():
     if not nonce: return
     to = _ask(_PROMPT_TO)
     if not to: return
+    mint = _ask("Token mint address")
+    if not mint: return
     raw = _ask("Amount  (token units, e.g. 1.5)")
     if not raw: return
     try:
-        # Use 9 decimals for wSOL, 6 for everything else (USDC etc.)
-        # Override with ARCIUM_TOKEN_DECIMALS if needed.
         _WSOL = "So11111111111111111111111111111111111111112"
         decimals = 9 if mint == _WSOL else int(os.getenv("ARCIUM_TOKEN_DECIMALS", "6"))
         amount = int(float(raw) * (10 ** decimals))
