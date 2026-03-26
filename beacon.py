@@ -193,6 +193,10 @@ def _resolve_arcium_meta(params: list) -> dict:
         meta = dict(meta, payer_ta=os.getenv("ARCIUM_PAYER_TOKEN_ACCOUNT", ""))
     if not meta.get("recipient_ta"):
         meta = dict(meta, recipient_ta=os.getenv("ARCIUM_RECIPIENT_TOKEN_ACCOUNT", ""))
+    if not meta.get("broadcaster_ta"):
+        v = os.getenv("ARCIUM_BROADCASTER_TOKEN_ACCOUNT", "")
+        if v:
+            meta = dict(meta, broadcaster_ta=v)
     return meta
 
 
@@ -452,7 +456,7 @@ def _test_arcium() -> None:
     print()
     if arcium and arcium.enabled:
         log_ok("Arcium MPC ACTIVE — payment stats will be logged after sendTransaction")
-        log_info("  Program:    7xeQNUggKc2e5q6AQxsFBLBkXGg2p54kSx11zVainMks")
+        log_info("  Program:    7fvHNYVuZP6EYt68GLUa4kU8f8dCBSaGafL9aDhhtMZN")
         log_info("  Instruction: execute_payment (logs encrypted amount via MPC)")
         log_info("  Triggered by: sendTransaction with arcium metadata in params")
     else:

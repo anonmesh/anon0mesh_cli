@@ -3,7 +3,7 @@
  * rescue_shim.mjs — Arcium helper shim for anon0mesh beacon
  * ===========================================================
  * Built from the actual anon0mesh contract:
- *   Program ID:  7fvHNYVuZP6EYt68GLUa4kU8f8dCBSaGafL9aDhhtMZN
+ *   Program ID:  7fvHNYVuZP6EYt68GLUa4kU8f8dCBSaGafL9aDhhtMZN  (declare_id! in lib.rs)
  *   Instruction: execute_payment(computation_offset, amount, nonce, pub_key)
  *   Purpose:     Log encrypted payment stats via Arcium MPC after a tx relays
  *
@@ -30,8 +30,8 @@ function readStdin() {
 const [,, cmd, ...args] = process.argv;
 
 // ── Constants from the real contract ──────────────────────────────────────────
-// From arcium_mxe.json IDL "address" field (the deployed ble_revshare program)
-const MXE_PROGRAM_ID = "7xeQNUggKc2e5q6AQxsFBLBkXGg2p54kSx11zVainMks";
+// declare_id! in programs/ble-revshare/src/lib.rs + Anchor.toml [programs.devnet]
+const MXE_PROGRAM_ID = "7fvHNYVuZP6EYt68GLUa4kU8f8dCBSaGafL9aDhhtMZN";
 
 // Hardcoded in contract:
 // const ARCIUM_SIGNER_PDA: Pubkey = Pubkey::new_from_array([...])
@@ -282,7 +282,11 @@ try {
 
         const signers = [payerKp];
         if (broadcasterKeypairHex) {
-            signers.push(Keypair.fromSecretKey(u8a(broadcasterKeypairHex)));
+            const broadcasterKp = Keypair.fromSecretKey(u8a(broadcasterKeypairHex));
+            // Only add if different pubkey — beacon uses same keypair for payer + broadcaster
+            if (broadcasterKp.publicKey.toBase58() !== payerKp.publicKey.toBase58()) {
+                signers.push(broadcasterKp);
+            }
         }
         tx.sign(...signers);
 

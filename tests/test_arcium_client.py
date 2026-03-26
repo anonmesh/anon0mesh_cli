@@ -226,8 +226,8 @@ def test_arcium_beacon_from_env_no_solana_package_disables(monkeypatch):
 # ── constants ─────────────────────────────────────────────────────────────────
 
 def test_mxe_program_id_is_idl_address():
-    # Must match the "address" field in arcium_mxe.json (the deployed ble_revshare program)
-    assert arcium_client.MXE_PROGRAM_ID == "7xeQNUggKc2e5q6AQxsFBLBkXGg2p54kSx11zVainMks"
+    # Must match declare_id! in programs/ble-revshare/src/lib.rs
+    assert arcium_client.MXE_PROGRAM_ID == "7fvHNYVuZP6EYt68GLUa4kU8f8dCBSaGafL9aDhhtMZN"
 
 
 def test_arcium_signer_pda_format():
