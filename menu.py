@@ -331,25 +331,11 @@ def _do_arcium_transfer():
         return
     log_ok(f"Beacon: {beacon_pk}")
 
-    # SPL token context required for the Arcium execute_payment computation.
-    # Without these the beacon can relay the tx but won't trigger Arcium MPC.
-    print(f"\n  {DIM}Arcium stats — SPL token context (required for MPC logging){RESET}")
-    mint     = _ask("SPL token mint")
-    payer_ta = _ask("Payer token account") if mint else None
-    recip_ta = _ask("Recipient token account") if mint else None
-
     partial_tx = partial_sign_arcium_transfer(kp_path, beacon_pk, nonce, to, lamports)
     if partial_tx:
-        arcium_meta = None
-        if mint and payer_ta and recip_ta:
-            arcium_meta = {
-                "amount":       lamports,
-                "mint":         mint,
-                "payer_ta":     payer_ta,
-                "recipient":    to,
-                "recipient_ta": recip_ta,
-            }
-        cosign_and_send(partial_tx, arcium_meta)
+        # Pass amount + recipient so the beacon can trigger Arcium execute_payment.
+        # Token account details are resolved by the beacon from its own env config.
+        cosign_and_send(partial_tx, {"amount": lamports, "recipient": to})
 
 
 # ── Durable nonce ──────────────────────────────────────────────────────────────

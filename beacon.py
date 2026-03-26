@@ -162,24 +162,13 @@ def _handle_cosign_transaction(params: list, req_id: int, count: int) -> bytes:
                     "params": [fully_signed_b64, {"encoding": "base64"}]}
     result_bytes = forward_plain_rpc(submit_req, req_id, count, "sendTransaction[co-signed]")
 
-    # Fire-and-forget Arcium stats (same as the plain sendTransaction path)
-    arcium_meta = params[1].get("arcium", {}) if len(params) > 1 and isinstance(params[1], dict) else {}
-    if arcium and arcium.enabled and arcium_meta.get("amount") and arcium_meta.get("mint"):
-        try:
-            parsed = decode_json(result_bytes)
-            if "result" in parsed and isinstance(parsed["result"], str):
-                arcium.log_payment_stats(
-                    amount                    = int(arcium_meta["amount"]),
-                    payer_token_account       = arcium_meta.get("payer_ta", ""),
-                    recipient                 = arcium_meta.get("recipient", ""),
-                    recipient_token_account   = arcium_meta.get("recipient_ta", ""),
-                    mint                      = arcium_meta["mint"],
-                    broadcaster               = arcium_meta.get("broadcaster"),
-                    broadcaster_token_account = arcium_meta.get("broadcaster_ta"),
-                )
-                log_info(f"[#{count}] Arcium payment stats queued (co-sign path)")
-        except Exception:
-            pass
+    # Fire-and-forget Arcium stats after successful relay
+    try:
+        parsed = decode_json(result_bytes)
+        if "result" in parsed and isinstance(parsed["result"], str):
+            _fire_arcium_stats(_resolve_arcium_meta(params), count, "co-sign path")
+    except Exception:
+        pass
 
     return result_bytes
 
@@ -193,30 +182,49 @@ def _dispatch_cosign(method: str, params: list, req_id: int, count: int) -> "byt
     return None
 
 
+def _resolve_arcium_meta(params: list) -> dict:
+    """Extract arcium metadata from params and fill missing token fields from env."""
+    meta = {}
+    if len(params) > 1 and isinstance(params[1], dict):
+        meta = params[1].get("arcium", {})
+    if not meta.get("mint"):
+        meta = dict(meta, mint=os.getenv("ARCIUM_MINT", ""))
+    if not meta.get("payer_ta"):
+        meta = dict(meta, payer_ta=os.getenv("ARCIUM_PAYER_TOKEN_ACCOUNT", ""))
+    if not meta.get("recipient_ta"):
+        meta = dict(meta, recipient_ta=os.getenv("ARCIUM_RECIPIENT_TOKEN_ACCOUNT", ""))
+    return meta
+
+
+def _fire_arcium_stats(meta: dict, count: int, label: str) -> None:
+    """Call arcium.log_payment_stats if amount, mint, and payer_ta are present."""
+    if not (arcium and arcium.enabled and meta.get("amount") and meta.get("mint") and meta.get("payer_ta")):
+        return
+    try:
+        arcium.log_payment_stats(
+            amount                    = int(meta["amount"]),
+            payer_token_account       = meta["payer_ta"],
+            recipient                 = meta.get("recipient", ""),
+            recipient_token_account   = meta.get("recipient_ta", ""),
+            mint                      = meta["mint"],
+            broadcaster               = meta.get("broadcaster"),
+            broadcaster_token_account = meta.get("broadcaster_ta"),
+        )
+        log_info(f"[#{count}] Arcium payment stats queued ({label})")
+    except Exception:
+        pass
+
+
 def _maybe_log_arcium_stats(params: list, result_bytes: bytes, count: int) -> None:
     """
     Fire-and-forget: log encrypted payment stats to the Arcium MXE after a
     successful sendTransaction.  Never raises — must not block the response.
-    Client may pass optional metadata as params[1] = {"arcium": {...}}.
     """
     try:
         parsed_result = decode_json(result_bytes)
         if not ("result" in parsed_result and isinstance(parsed_result["result"], str)):
             return
-        arcium_meta = {}
-        if len(params) > 1 and isinstance(params[1], dict):
-            arcium_meta = params[1].get("arcium", {})
-        if arcium_meta.get("amount") and arcium_meta.get("mint"):
-            arcium.log_payment_stats(
-                amount                    = int(arcium_meta["amount"]),
-                payer_token_account       = arcium_meta.get("payer_ta", ""),
-                recipient                 = arcium_meta.get("recipient", ""),
-                recipient_token_account   = arcium_meta.get("recipient_ta", ""),
-                mint                      = arcium_meta["mint"],
-                broadcaster               = arcium_meta.get("broadcaster"),
-                broadcaster_token_account = arcium_meta.get("broadcaster_ta"),
-            )
-            log_info(f"[#{count}] Arcium payment stats queued (fire-and-forget)")
+        _fire_arcium_stats(_resolve_arcium_meta(params), count, "fire-and-forget")
     except Exception:
         pass
 
