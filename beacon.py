@@ -444,7 +444,7 @@ def _test_arcium() -> None:
     print()
     if arcium and arcium.enabled:
         log_ok("Arcium MPC ACTIVE — payment stats will be logged after sendTransaction")
-        log_info("  Program:    7fvHNYVuZP6EYt68GLUa4kU8f8dCBSaGafL9aDhhtMZN")
+        log_info("  Program:    7xeQNUggKc2e5q6AQxsFBLBkXGg2p54kSx11zVainMks")
         log_info("  Instruction: execute_payment (logs encrypted amount via MPC)")
         log_info("  Triggered by: sendTransaction with arcium metadata in params")
     else:
