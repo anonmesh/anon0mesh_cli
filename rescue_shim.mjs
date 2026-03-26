@@ -16,6 +16,7 @@ import {
     getCompDefAccAddress, getCompDefAccOffset,
     getComputationAccAddress, getExecutingPoolAccAddress,
     getFeePoolAccAddress, getMempoolAccAddress, getMXEAccAddress,
+    getArciumEnv, getArciumProgramId,
 } from "@arcium-hq/client";
 import { randomBytes, createHash } from "crypto";
 import { readFileSync } from "node:fs";
@@ -31,11 +32,6 @@ const [,, cmd, ...args] = process.argv;
 // ── Constants from the real contract ──────────────────────────────────────────
 // From arcium_mxe.json IDL "address" field (the deployed ble_revshare program)
 const MXE_PROGRAM_ID = "7xeQNUggKc2e5q6AQxsFBLBkXGg2p54kSx11zVainMks";
-
-// Arcium core framework program — passed as the `arcium_program` account in
-// every execute_payment instruction (CPI target for queue_computation).
-// Source: arcium_mxe.json IDL accounts[].address for "arcium_program"
-const ARCIUM_PROGRAM_ID = "Arcj82pX7HxYKLR92qvgZUAd7vGS1k4hQvAFcPATFdEQ";
 
 // Hardcoded in contract:
 // const ARCIUM_SIGNER_PDA: Pubkey = Pubkey::new_from_array([...])
@@ -133,8 +129,10 @@ try {
     } else if (cmd === "arcium_accounts") {
         // Return all PDAs for execute_payment
         const [programIdArg, clusterOffsetStr, computationOffsetStr] = args;
-        const programId     = programIdArg || MXE_PROGRAM_ID;
-        const clusterOffset = parseInt(clusterOffsetStr || "456");
+        const programId = programIdArg || MXE_PROGRAM_ID;
+        let clusterOffset;
+        try { clusterOffset = getArciumEnv().arciumClusterOffset; }
+        catch { clusterOffset = Number.parseInt(clusterOffsetStr || "456"); }
 
         const { PublicKey } = await import("@solana/web3.js");
         const anchor        = await import("@coral-xyz/anchor");
@@ -202,11 +200,13 @@ try {
         const { TOKEN_PROGRAM_ID } = await import("@solana/spl-token");
         const anchor = await import("@coral-xyz/anchor");
 
-        const programId     = progIdArg || MXE_PROGRAM_ID;
-        const connection    = new Connection(rpcUrl || "https://api.devnet.solana.com", "confirmed");
-        const payerKp       = Keypair.fromSecretKey(u8a(payerKeypairHex));
-        const progPubkey    = new PublicKey(programId);
-        const clusterOffset = parseInt(clusterOffStr || "456");
+        const programId  = progIdArg || MXE_PROGRAM_ID;
+        const connection = new Connection(rpcUrl || "https://api.devnet.solana.com", "confirmed");
+        const payerKp    = Keypair.fromSecretKey(u8a(payerKeypairHex));
+        const progPubkey = new PublicKey(programId);
+        let clusterOffset;
+        try { clusterOffset = getArciumEnv().arciumClusterOffset; }
+        catch { clusterOffset = Number.parseInt(clusterOffStr || "456"); }
 
         // Random 8-byte computation offset (matches docs: new anchor.BN(randomBytes(8), "hex"))
         const compOffsetBN  = new anchor.BN(randomBytes(8), "hex");
@@ -270,9 +270,8 @@ try {
             { pubkey: clockAccount,      isSigner: false,        isWritable: true  },
             { pubkey: TOKEN_PROGRAM_ID,  isSigner: false,        isWritable: false },
             { pubkey: SystemProgram.programId, isSigner: false,  isWritable: false },
-            // arcium_program is the Arcium core framework program (not the MXE program).
-            // Source: arcium_mxe.json IDL accounts[].address for "arcium_program"
-            { pubkey: new PublicKey(ARCIUM_PROGRAM_ID), isSigner: false, isWritable: false },
+            // arcium_program: Arcium core framework program resolved via SDK
+            { pubkey: getArciumProgramId(), isSigner: false, isWritable: false },
         ];
 
         const ix  = new TransactionInstruction({ keys, programId: progPubkey, data: ix_data });

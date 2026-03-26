@@ -230,10 +230,5 @@ def test_mxe_program_id_is_idl_address():
     assert arcium_client.MXE_PROGRAM_ID == "7xeQNUggKc2e5q6AQxsFBLBkXGg2p54kSx11zVainMks"
 
 
-def test_arcium_program_id_is_core_framework():
-    # Must match the arcium_program account address in arcium_mxe.json IDL
-    assert arcium_client.ARCIUM_PROGRAM_ID == "Arcj82pX7HxYKLR92qvgZUAd7vGS1k4hQvAFcPATFdEQ"
-
-
 def test_arcium_signer_pda_format():
     assert len(arcium_client.ARCIUM_SIGNER_PDA) >= 32
