@@ -20,6 +20,7 @@ import {
 } from "@arcium-hq/client";
 import { randomBytes, createHash } from "crypto";
 import { readFileSync } from "node:fs";
+import BN from "bn.js";
 
 // Read all of stdin synchronously — used for sensitive values (keys, secrets)
 // that must not appear in the process argument list (ps aux / /proc/pid/cmdline).
@@ -135,8 +136,7 @@ try {
         catch { clusterOffset = Number.parseInt(clusterOffsetStr || "456"); }
 
         const { PublicKey } = await import("@solana/web3.js");
-        const anchor        = await import("@coral-xyz/anchor");
-        const computationOffset = new anchor.BN(computationOffsetStr || "0");
+        const computationOffset = new BN(computationOffsetStr || "0");
         const progPubkey        = new PublicKey(programId);
         const compDefOffset     = Buffer.from(getCompDefAccOffset(COMP_DEF_NAME)).readUInt32LE();
 
@@ -198,7 +198,6 @@ try {
             Transaction, TransactionInstruction, SystemProgram,
         } = await import("@solana/web3.js");
         const { TOKEN_PROGRAM_ID } = await import("@solana/spl-token");
-        const anchor = await import("@coral-xyz/anchor");
 
         const programId  = progIdArg || MXE_PROGRAM_ID;
         const connection = new Connection(rpcUrl || "https://api.devnet.solana.com", "confirmed");
@@ -208,8 +207,8 @@ try {
         try { clusterOffset = getArciumEnv().arciumClusterOffset; }
         catch { clusterOffset = Number.parseInt(clusterOffStr || "456"); }
 
-        // Random 8-byte computation offset (matches docs: new anchor.BN(randomBytes(8), "hex"))
-        const compOffsetBN  = new anchor.BN(randomBytes(8), "hex");
+        // Random 8-byte computation offset
+        const compOffsetBN  = new BN(randomBytes(8), "hex");
         const compDefOffset = Buffer.from(getCompDefAccOffset(COMP_DEF_NAME)).readUInt32LE();
 
         // PDAs — exact match to getArciumAccounts() in the hook
