@@ -161,15 +161,6 @@ def _handle_cosign_transaction(params: list, req_id: int, count: int) -> bytes:
     submit_req   = {"jsonrpc": "2.0", "id": req_id, "method": "sendTransaction",
                     "params": [fully_signed_b64, {"encoding": "base64"}]}
     result_bytes = forward_plain_rpc(submit_req, req_id, count, "sendTransaction[co-signed]")
-
-    # Fire-and-forget Arcium stats after successful relay
-    try:
-        parsed = decode_json(result_bytes)
-        if "result" in parsed and isinstance(parsed["result"], str):
-            _fire_arcium_stats(_resolve_arcium_meta(params), count, "co-sign path")
-    except Exception:
-        pass
-
     return result_bytes
 
 
@@ -202,7 +193,12 @@ def _resolve_arcium_meta(params: list) -> dict:
 
 def _fire_arcium_stats(meta: dict, count: int, label: str) -> None:
     """Call arcium.log_payment_stats if amount, mint, and payer_ta are present."""
-    if not (arcium and arcium.enabled and meta.get("amount") and meta.get("mint") and meta.get("payer_ta")):
+    if not arcium or not arcium.enabled:
+        return
+    missing = [k for k in ("amount", "mint", "payer_ta") if not meta.get(k)]
+    if missing:
+        log_warn(f"[#{count}] Arcium skipped — missing: {', '.join(missing)}"
+                 f"  (set ARCIUM_MINT / ARCIUM_PAYER_TOKEN_ACCOUNT in .env)")
         return
     try:
         arcium.log_payment_stats(
@@ -215,8 +211,8 @@ def _fire_arcium_stats(meta: dict, count: int, label: str) -> None:
             broadcaster_token_account = meta.get("broadcaster_ta"),
         )
         log_info(f"[#{count}] Arcium payment stats queued ({label})")
-    except Exception:
-        pass
+    except Exception as exc:
+        log_err(f"[#{count}] Arcium execute_payment failed: {exc}")
 
 
 def _maybe_log_arcium_stats(params: list, result_bytes: bytes, count: int) -> None:

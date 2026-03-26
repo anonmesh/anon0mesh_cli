@@ -7,6 +7,7 @@ To add a command:
 """
 
 import io
+import os
 import sys
 import json
 import threading
@@ -27,7 +28,7 @@ from rpc import (
 from wallet import (
     generate_wallet, import_wallet,
     offline_sign_nonce_transfer,
-    create_nonce_account, partial_sign_arcium_transfer,
+    create_nonce_account, partial_sign_execute_payment,
     scan_nonce_accounts, HAS_SOLDERS,
 )
 
@@ -305,23 +306,36 @@ def _do_arcium_transfer():
     if not state.active_wallet:
         log_warn(_NO_WALLET); return
 
+    # Required env config — must be set before running
+    mint           = os.getenv("ARCIUM_MINT", "").strip()
+    mxe_pubkey_hex = os.getenv("ARCIUM_MXE_PUBKEY_HEX", "").strip()
+    if not mint:
+        log_err("ARCIUM_MINT not set in .env  (SPL mint for the whitelisted token)")
+        return
+    if not mxe_pubkey_hex:
+        log_err("ARCIUM_MXE_PUBKEY_HEX not set in .env  (run: node rescue_shim.mjs mxe_pubkey)")
+        return
+
     kp_path = state.active_wallet["path"]
     pubkey  = state.active_wallet["pubkey"]
 
     print(f"\n  {BOLD}From:{RESET} {GREEN}{pubkey}{RESET}")
-    get_balance(pubkey)
 
     nonce = _select_nonce_account()
     if not nonce: return
     to = _ask(_PROMPT_TO)
     if not to: return
-    raw = _ask(_PROMPT_AMOUNT)
+    raw = _ask("Amount  (token units, e.g. 1.5)")
     if not raw: return
     try:
-        lamports = int(float(raw) * 1_000_000_000)
+        # Use 9 decimals for wSOL, 6 for everything else (USDC etc.)
+        # Override with ARCIUM_TOKEN_DECIMALS if needed.
+        _WSOL = "So11111111111111111111111111111111111111112"
+        decimals = 9 if mint == _WSOL else int(os.getenv("ARCIUM_TOKEN_DECIMALS", "6"))
+        amount = int(float(raw) * (10 ** decimals))
     except ValueError:
         log_warn(_INVALID_AMOUNT); return
-    if lamports <= 0:
+    if amount <= 0:
         log_warn("Amount must be greater than 0"); return
 
     log_info("Fetching beacon co-signing pubkey…")
@@ -329,13 +343,24 @@ def _do_arcium_transfer():
     if not beacon_pk:
         log_err("Could not get beacon pubkey — is ARCIUM_PAYER_KEYPAIR set on the beacon?")
         return
-    log_ok(f"Beacon: {beacon_pk}")
+    log_ok(f"Beacon (broadcaster): {beacon_pk}")
 
-    partial_tx = partial_sign_arcium_transfer(kp_path, beacon_pk, nonce, to, lamports)
+    cluster_offset         = int(os.getenv("ARCIUM_CLUSTER_OFFSET", "456"))
+    broadcaster_ta         = os.getenv("ARCIUM_BROADCASTER_TOKEN_ACCOUNT", "").strip() or None
+
+    partial_tx = partial_sign_execute_payment(
+        payer_keypair_path           = kp_path,
+        beacon_pubkey_str            = beacon_pk,
+        nonce_account_str            = nonce,
+        recipient_str                = to,
+        amount                       = amount,
+        mxe_pubkey_hex               = mxe_pubkey_hex,
+        mint_str                     = mint,
+        broadcaster_token_account_str= broadcaster_ta,
+        cluster_offset               = cluster_offset,
+    )
     if partial_tx:
-        # Pass amount + recipient so the beacon can trigger Arcium execute_payment.
-        # Token account details are resolved by the beacon from its own env config.
-        cosign_and_send(partial_tx, {"amount": lamports, "recipient": to})
+        cosign_and_send(partial_tx, {"amount": amount, "recipient": to})
 
 
 # ── Durable nonce ──────────────────────────────────────────────────────────────
