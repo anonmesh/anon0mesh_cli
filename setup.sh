@@ -54,8 +54,15 @@ INSTALL_CLIENT=false
 INSTALL_SYSTEMD=false
 INSTALL_BLE=false
 INSTALL_MESHTASTIC=false
+SETUP_WALLET=false
 SOLANA_NETWORK="devnet"
 NONINTERACTIVE=false
+
+# Wallet/nonce outputs — populated by Step 9, referenced in the summary
+WALLET_KEYPAIR_PATH=""
+WALLET_PUBKEY=""
+NONCE_ACCOUNT_PUBKEY=""
+NONCE_KEYPAIR_PATH=""
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 for arg in "$@"; do
@@ -66,10 +73,11 @@ for arg in "$@"; do
     --systemd)   INSTALL_SYSTEMD=true ;;
     --ble)       INSTALL_BLE=true ;;
     --meshtastic) INSTALL_MESHTASTIC=true ;;
-    --mainnet)   SOLANA_NETWORK="mainnet" ;;
-    --devnet)    SOLANA_NETWORK="devnet" ;;
+    --mainnet)     SOLANA_NETWORK="mainnet" ;;
+    --devnet)      SOLANA_NETWORK="devnet" ;;
+    --wallet-setup) SETUP_WALLET=true ;;
     --help|-h)
-      echo "Usage: $0 [--beacon] [--client] [--both] [--systemd] [--ble] [--meshtastic] [--mainnet|--devnet]"
+      echo "Usage: $0 [--beacon] [--client] [--both] [--systemd] [--ble] [--meshtastic] [--mainnet|--devnet] [--wallet-setup]"
       exit 0 ;;
   esac
 done
@@ -110,6 +118,16 @@ if [[ "$NONINTERACTIVE" == false ]]; then
     echo ""
     read -rp "Install beacon as systemd service (auto-start on boot)? [y/N]: " sd_choice
     [[ "$sd_choice" =~ ^[Yy]$ ]] && INSTALL_SYSTEMD=true
+  fi
+
+  if [[ "$INSTALL_CLIENT" == true ]]; then
+    echo ""
+    echo -e "${BOLD}Set up a Solana signing wallet + durable nonce account?${R}"
+    echo "  · A keypair is needed to sign transactions offline."
+    echo "  · A nonce account lets signed transactions stay valid indefinitely"
+    echo "    (no blockhash expiry) — ideal for off-grid / mesh-delayed relay."
+    read -rp "Set up now? [y/N]: " wallet_choice
+    [[ "$wallet_choice" =~ ^[Yy]$ ]] && SETUP_WALLET=true
   fi
 fi
 
@@ -179,9 +197,9 @@ OPTIONAL_DEPS=()
 [[ "$INSTALL_BLE" == true ]]       && OPTIONAL_DEPS+=("bleak>=0.22.0")
 [[ "$INSTALL_MESHTASTIC" == true ]] && OPTIONAL_DEPS+=("meshtastic")
 
-# solders for offline signing (client)
+# solders for offline signing + qrcode for wallet QR display (client)
 if [[ "$INSTALL_CLIENT" == true ]]; then
-  OPTIONAL_DEPS+=("solders")
+  OPTIONAL_DEPS+=("solders" "qrcode>=7.4.2")
 fi
 
 log_info "Installing core deps: ${CORE_DEPS[*]}"
@@ -204,6 +222,8 @@ fi
 if [[ "$INSTALL_CLIENT" == true ]]; then
   python -c "import solders" && log_ok "solders import OK (offline signing enabled)" \
     || log_warn "solders not available — offline signing disabled"
+  python -c "import qrcode" && log_ok "qrcode import OK (wallet QR display enabled)" \
+    || log_warn "qrcode not available — wallet QR display disabled"
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -379,12 +399,11 @@ for arg in "\$@"; do
   fi
 done
 
-CMD="python \$SCRIPT_DIR/client.py"
-[[ \${#HASHES[@]} -gt 0 ]] && CMD="\$CMD --beacon \${HASHES[*]}"
-CMD="\$CMD --discover"   # always keep discovery on for new beacons
-CMD="\$CMD --strategy race"
+CMD=(python "\$SCRIPT_DIR/client.py")
+[[ \${#HASHES[@]} -gt 0 ]] && CMD+=(--beacon "\${HASHES[@]}")
+CMD+=(--discover --strategy race)   # always keep discovery on for new beacons
 
-exec \$CMD "\${EXTRA_ARGS[@]}"
+exec "\${CMD[@]}" "\${EXTRA_ARGS[@]}"
 LAUNCHER
   chmod +x "$SCRIPT_DIR/run_client.sh"
   log_ok "run_client.sh created"
@@ -449,18 +468,278 @@ except ImportError:
 
 try:
     from shared import APP_NAME, APP_ASPECT, build_rpc, decode_json
-    r = build_rpc('getSlot')
-    import json; json.loads(r)
+    import json; json.loads(build_rpc('getSlot'))
 except Exception as e:
-    errors.append(f'shared.py error: {e}')
+    errors.append(f'shared: {e}')
+
+try:
+    import state
+    assert hasattr(state, 'pool')
+    assert hasattr(state, 'active_wallet')
+except Exception as e:
+    errors.append(f'state: {e}')
+
+try:
+    from mesh import BeaconPool, BeaconAnnounceHandler, BeaconLink
+except Exception as e:
+    errors.append(f'mesh: {e}')
+
+try:
+    import rpc
+    assert callable(rpc.rpc_call)
+    assert callable(rpc.get_balance)
+    assert callable(rpc.send_transaction)
+    assert callable(rpc.get_nonce_account)
+except Exception as e:
+    errors.append(f'rpc: {e}')
+
+try:
+    import wallet
+    assert callable(wallet.generate_wallet)
+    assert callable(wallet.import_wallet)
+    assert callable(wallet.create_nonce_account)
+except Exception as e:
+    errors.append(f'wallet: {e}')
+
+try:
+    import menu
+    assert callable(menu.repl)
+    assert isinstance(menu._MENU_SECTIONS, list)
+except Exception as e:
+    errors.append(f'menu: {e}')
 
 if errors:
     for e in errors:
         print('FAIL:', e)
     sys.exit(1)
 else:
-    print('All imports OK')
+    print('All modules OK')
 " && log_ok "Smoke test passed" || { log_err "Smoke test failed"; exit 1; }
+
+# ═════════════════════════════════════════════════════════════════════════════
+# STEP 9 — Solana wallet + durable nonce account (client only, opt-in)
+# ═════════════════════════════════════════════════════════════════════════════
+if [[ "$INSTALL_CLIENT" == true && "$SETUP_WALLET" == true ]]; then
+  log_step "Solana wallet + durable nonce account"
+
+  if ! python -c "import solders" 2>/dev/null; then
+    log_warn "solders not installed — skipping wallet setup (pip install solders)"
+  else
+
+    # ── 9a: Keypair ──────────────────────────────────────────────────────────
+    log_info "Step 9a: Solana signing keypair"
+
+    if [[ -f "$SCRIPT_DIR/wallet.json" ]]; then
+      log_info "wallet.json already exists in project directory."
+      read -rp "  Reuse it? [Y/n]: " reuse_choice
+      if [[ ! "$reuse_choice" =~ ^[Nn]$ ]]; then
+        WALLET_KEYPAIR_PATH="$SCRIPT_DIR/wallet.json"
+        log_ok "Reusing existing wallet.json"
+      fi
+    fi
+
+    if [[ -z "$WALLET_KEYPAIR_PATH" ]]; then
+      echo "  1) Generate a new keypair  (saved to wallet.json)"
+      echo "  2) Use an existing keypair file"
+      read -rp "Choice [1/2, default=1]: " kp_choice
+
+      if [[ "$kp_choice" == "2" ]]; then
+        read -rp "  Path to keypair JSON: " kp_import
+        if [[ ! -f "$kp_import" ]]; then
+          log_err "File not found: $kp_import — skipping wallet setup"
+        else
+          WALLET_KEYPAIR_PATH="$kp_import"
+          log_ok "Using keypair: $WALLET_KEYPAIR_PATH"
+        fi
+      else
+        WALLET_KEYPAIR_PATH="$SCRIPT_DIR/wallet.json"
+        # Generate keypair via Python; pass path through env to avoid heredoc quoting issues
+        ANON0MESH_KP_PATH="$WALLET_KEYPAIR_PATH" python << 'PYEOF'
+import os, json
+from solders.keypair import Keypair
+kp   = Keypair()
+path = os.environ["ANON0MESH_KP_PATH"]
+with open(path, "w") as f:
+    json.dump(list(bytes(kp)), f)
+print(f"  Public key : {kp.pubkey()}")
+print(f"  Saved to   : {path}")
+PYEOF
+        if [[ $? -ne 0 ]]; then
+          log_err "Keypair generation failed"; WALLET_KEYPAIR_PATH=""
+        else
+          log_ok "Keypair saved → $WALLET_KEYPAIR_PATH"
+          log_warn "Keep wallet.json safe — it contains your private key!"
+        fi
+      fi
+    fi
+
+    # ── Show public key + funding instructions ────────────────────────────────
+    if [[ -n "$WALLET_KEYPAIR_PATH" ]]; then
+      WALLET_PUBKEY=$(ANON0MESH_KP_PATH="$WALLET_KEYPAIR_PATH" python << 'PYEOF'
+import os, json
+from solders.keypair import Keypair
+with open(os.environ["ANON0MESH_KP_PATH"]) as f:
+    kp = Keypair.from_bytes(bytes(json.load(f)))
+print(kp.pubkey(), end="")
+PYEOF
+)
+      log_ok "Wallet public key: $WALLET_PUBKEY"
+      echo ""
+      if [[ "$SOLANA_NETWORK" == "devnet" ]]; then
+        log_info "Get free devnet SOL (needed for nonce account):"
+        log_info "  https://faucet.solana.com"
+        log_info "  solana airdrop 2 $WALLET_PUBKEY --url devnet"
+      else
+        log_info "Fund this address with SOL before creating the nonce account:"
+        log_info "  $WALLET_PUBKEY"
+      fi
+
+      # ── 9b: Durable nonce account ─────────────────────────────────────────
+      echo ""
+      log_info "Step 9b: Durable nonce account"
+      echo ""
+      echo "  A durable nonce account replaces the expiring blockhash in transactions."
+      echo "  Transactions signed with a nonce stay valid until relayed — perfect for"
+      echo "  off-grid / mesh-delayed scenarios where timing is unpredictable."
+      echo "  Cost: ~0.00144768 SOL (rent-exempt deposit, recoverable on close)."
+      echo ""
+      read -rp "  Create nonce account now? [y/N]: " nonce_choice
+
+      if [[ "$nonce_choice" =~ ^[Yy]$ ]]; then
+        # Resolve direct RPC URL for setup (internet available here, no mesh needed)
+        case "$SOLANA_NETWORK" in
+          mainnet) _SETUP_RPC="https://api.mainnet-beta.solana.com" ;;
+          testnet) _SETUP_RPC="https://api.testnet.solana.com" ;;
+          *)       _SETUP_RPC="https://api.devnet.solana.com" ;;
+        esac
+
+        log_info "Connecting to $_SETUP_RPC ..."
+
+        # Run Python once.
+        # Status/progress messages  → stderr  (shown directly to the user)
+        # KEY=VALUE result lines    → stdout  (captured into _nonce_out)
+        _nonce_out=$(
+          ANON0MESH_KP_PATH="$WALLET_KEYPAIR_PATH" \
+          ANON0MESH_RPC="$_SETUP_RPC" \
+          ANON0MESH_DIR="$SCRIPT_DIR" \
+          python << 'PYEOF'
+import os, sys, json, base64
+import requests
+from solders.keypair     import Keypair
+from solders.pubkey      import Pubkey
+from solders.transaction import Transaction
+from solders.system_program import (
+    create_account, CreateAccountParams,
+    initialize_nonce_account, InitializeNonceAccountParams,
+)
+from solders.message import Message
+from solders.hash    import Hash
+
+RPC       = os.environ["ANON0MESH_RPC"]
+SAVE_DIR  = os.environ["ANON0MESH_DIR"]
+NONCE_LEN = 80  # fixed by the Solana runtime
+
+def rpc(method, params):
+    r = requests.post(
+        RPC,
+        json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+        headers={"Content-Type": "application/json"},
+        timeout=20,
+    )
+    r.raise_for_status()
+    d = r.json()
+    if "error" in d:
+        raise RuntimeError(d["error"].get("message", str(d["error"]))
+                           if isinstance(d["error"], dict) else str(d["error"]))
+    return d
+
+try:
+    with open(os.environ["ANON0MESH_KP_PATH"]) as f:
+        payer = Keypair.from_bytes(bytes(json.load(f)))
+
+    nonce_kp   = Keypair()
+    nonce_path = os.path.join(SAVE_DIR, f"nonce_{str(nonce_kp.pubkey())[:8]}.json")
+    with open(nonce_path, "w") as f:
+        json.dump(list(bytes(nonce_kp)), f)
+
+    payer_pub = payer.pubkey()
+    nonce_pub = nonce_kp.pubkey()
+    print(f"  Nonce keypair:  {nonce_pub}", file=sys.stderr)
+
+    rent      = rpc("getMinimumBalanceForRentExemption", [NONCE_LEN])["result"]
+    print(f"  Rent required:  {rent} lamports", file=sys.stderr)
+    blockhash = rpc("getLatestBlockhash", [])["result"]["value"]["blockhash"]
+
+    create_ix = create_account(CreateAccountParams(
+        from_pubkey = payer_pub,
+        to_pubkey   = nonce_pub,
+        lamports    = rent,
+        space       = NONCE_LEN,
+        owner       = Pubkey.from_string("11111111111111111111111111111111"),
+    ))
+    init_ix = initialize_nonce_account(InitializeNonceAccountParams(
+        nonce_pubkey      = nonce_pub,
+        authorized_pubkey = payer_pub,
+    ))
+    bh  = Hash.from_string(blockhash)
+    msg = Message.new_with_blockhash([create_ix, init_ix], payer_pub, bh)
+    tx  = Transaction.new_unsigned(msg)
+    tx.sign([payer, nonce_kp], bh)
+
+    print("  Sending transaction...", file=sys.stderr)
+    sig = rpc("sendTransaction", [base64.b64encode(bytes(tx)).decode(),
+                                  {"encoding": "base64"}])["result"]
+
+    # KEY=VALUE to stdout — captured by the shell
+    print(f"NONCE_PUBKEY={nonce_pub}")
+    print(f"NONCE_KEYPAIR_PATH={nonce_path}")
+    print(f"NONCE_SIG={sig}")
+    print(f"NONCE_LAMPORTS={rent}")
+
+except Exception as exc:
+    print(f"ERROR: {exc}", file=sys.stderr)
+    # Remove the saved keypair only if we generated it and the tx failed
+    try:
+        os.remove(nonce_path)
+    except Exception:
+        pass
+    sys.exit(1)
+PYEOF
+        )
+        _nonce_exit=$?
+
+        if [[ $_nonce_exit -eq 0 ]]; then
+          while IFS='=' read -r key val; do
+            case "$key" in
+              NONCE_PUBKEY)       NONCE_ACCOUNT_PUBKEY="$val" ;;
+              NONCE_KEYPAIR_PATH) NONCE_KEYPAIR_PATH="$val" ;;
+              NONCE_SIG)          _nonce_sig="$val" ;;
+              NONCE_LAMPORTS)     _nonce_rent="$val" ;;
+            esac
+          done <<< "$_nonce_out"
+          log_ok "Nonce account created!"
+          log_info "  Nonce pubkey:  $NONCE_ACCOUNT_PUBKEY"
+          log_info "  Nonce keypair: $NONCE_KEYPAIR_PATH"
+          log_info "  Funded:        $_nonce_rent lamports"
+          log_info "  Signature:     $_nonce_sig"
+        else
+          log_warn "Nonce account creation failed."
+          log_info "  Most likely cause: wallet not funded yet."
+          if [[ "$SOLANA_NETWORK" == "devnet" ]]; then
+            log_info "  Fund with:   solana airdrop 2 $WALLET_PUBKEY --url devnet"
+          fi
+          log_info "  Retry later: ./run_client.sh <BEACON_HASH>"
+          log_info "    In the menu: DURABLE NONCE → Create nonce account"
+        fi
+      else
+        log_info "Skipping nonce account — create later from the client menu:"
+        log_info "  ./run_client.sh <BEACON_HASH>"
+        log_info "  In the menu: DURABLE NONCE → Create nonce account"
+      fi
+    fi
+
+  fi  # solders available
+fi  # INSTALL_CLIENT && SETUP_WALLET
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Done — print summary
@@ -499,5 +778,8 @@ fi
 echo -e "${DIM}  Reticulum config:  $RNS_CONFIG_FILE${R}"
 echo -e "${DIM}  venv:              $VENV_DIR${R}"
 echo -e "${DIM}  Network:           $SOLANA_NETWORK${R}"
-[[ "$BACKUP_DONE" == true ]] && echo -e "${DIM}  Old config backed up (see $RNS_CONFIG_DIR/*.bak.*)${R}"
+[[ "$BACKUP_DONE" == true ]]        && echo -e "${DIM}  Old config backed up (see $RNS_CONFIG_DIR/*.bak.*)${R}"
+[[ -n "$WALLET_KEYPAIR_PATH" ]]     && echo -e "${DIM}  Signing keypair:   $WALLET_KEYPAIR_PATH  ($WALLET_PUBKEY)${R}"
+[[ -n "$NONCE_ACCOUNT_PUBKEY" ]]    && echo -e "${DIM}  Nonce account:     $NONCE_ACCOUNT_PUBKEY${R}"
+[[ -n "$NONCE_KEYPAIR_PATH" ]]      && echo -e "${DIM}  Nonce keypair:     $NONCE_KEYPAIR_PATH${R}"
 echo ""

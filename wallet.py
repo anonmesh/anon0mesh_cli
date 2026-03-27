@@ -237,122 +237,15 @@ def offline_sign_transfer(keypair_json_path, to_address, lamports, blockhash=Non
     return tx_b64
 
 
-def partial_sign_arcium_transfer(
-    payer_keypair_path: str,
-    beacon_pubkey_str: str,
-    nonce_account_str: str,
-    to_address: str,
-    lamports: int,
-    nonce_value: str | None = None,
-) -> str | None:
-    """
-    Build and PARTIALLY sign a SOL transfer using a Durable Nonce + beacon co-sign.
-
-    Why Durable Nonce (not recent blockhash):
-      - Replay protection: nonce is consumed on-chain the moment the tx lands;
-        the same tx bytes cannot be resubmitted.
-      - Double-spend protection: a second submission with the same nonce fails.
-      - No expiry: the tx stays valid while it travels the mesh waiting for
-        the beacon's co-signature (regular blockhash txs expire after ~90 s).
-
-    Transaction layout (Solana requires advanceNonceAccount as instruction 0):
-      Instruction 0: SystemProgram.advanceNonceAccount(nonce_account, authority=payer)
-      Instruction 1: SPL Memo("anon0mesh:relay") — lists payer AND beacon as signers,
-                     making beacon's co-signature mandatory on-chain.
-      Instruction 2: SystemProgram.transfer(payer → recipient, lamports)
-
-    Signer slots: [payer (slot 0), beacon (slot 1)]
-      - Client fills slot 0 via partial_sign.
-      - Beacon fills slot 1 via cosignTransaction before submitting to Solana.
-
-    Returns the partially-signed tx as base64, or None on failure.
-    """
-    if not HAS_SOLDERS:
-        log_err("Requires: pip install solders")
-        return None
-
-    try:
-        with open(payer_keypair_path) as f:
-            payer = Keypair.from_bytes(bytes(json.load(f)))
-    except Exception as exc:
-        log_err(f"Failed to load keypair: {exc}")
-        return None
-
-    try:
-        beacon_pubkey = Pubkey.from_string(beacon_pubkey_str)
-        nonce_pubkey  = Pubkey.from_string(nonce_account_str)
-        to_pubkey     = Pubkey.from_string(to_address)
-    except Exception as exc:
-        log_err(f"Invalid address: {exc}")
-        return None
-
-    payer_pubkey = payer.pubkey()
-
-    if nonce_value is None:
-        log_info("Fetching nonce value from chain...")
-        from rpc import get_nonce_account
-        nonce_info = get_nonce_account(nonce_account_str)
-        if nonce_info is None:
-            log_err(_ERR_NONCE)
-            return None
-        nonce_value = nonce_info["nonce"]
-
-    log_info("Building Arcium co-sign transfer (durable nonce)")
-    log_info(f"  From:         {payer_pubkey}")
-    log_info(f"  To:           {to_pubkey}")
-    log_info(f"  Amount:       {lamports:,} lamports")
-    log_info(f"  Nonce acct:   {nonce_pubkey}")
-    log_info(f"  Nonce value:  {nonce_value}")
-    log_info(f"  Beacon:       {beacon_pubkey}")
-
-    # SPL Memo program — standard on all Solana clusters
-    MEMO_PROGRAM = Pubkey.from_string("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr")
-
-    advance_ix = advance_nonce_account(AdvanceNonceAccountParams(
-        nonce_pubkey=nonce_pubkey,
-        authorized_pubkey=payer_pubkey,
-    ))
-    # Memo ix lists both payer and beacon as required signers.
-    # This sets num_required_signatures = 2 on the message header,
-    # so Solana rejects the tx unless both signatures are present.
-    memo_ix = Instruction(
-        program_id=MEMO_PROGRAM,
-        accounts=[
-            AccountMeta(pubkey=payer_pubkey,  is_signer=True, is_writable=False),
-            AccountMeta(pubkey=beacon_pubkey, is_signer=True, is_writable=False),
-        ],
-        data=b"anon0mesh:relay",
-    )
-    transfer_ix = transfer(TransferParams(
-        from_pubkey=payer_pubkey,
-        to_pubkey=to_pubkey,
-        lamports=lamports,
-    ))
-
-    nonce_hash = Hash.from_string(nonce_value)
-    msg = Message.new_with_blockhash([advance_ix, memo_ix, transfer_ix], payer_pubkey, nonce_hash)
-    tx  = Transaction.new_unsigned(msg)
-
-    # Partial sign — fills payer slot (0) only; beacon slot (1) left zeroed
-    tx.partial_sign([payer], nonce_hash)
-
-    tx_b64 = base64.b64encode(bytes(tx)).decode("utf-8")
-    log_ok(f"Transaction partially signed ({len(tx_b64)} chars) — awaiting beacon co-sign")
-    print(f"\n  Partial TX: {BOLD}{tx_b64[:72]}...{RESET}")
-    print(f"  {DIM}Durable nonce — tx won't expire on the mesh.{RESET}")
-    print(f"  {DIM}Sending to beacon for co-signature...{RESET}\n")
-    return tx_b64
-
 
 # ── SPL / ATA helpers ──────────────────────────────────────────────────────────
 
-_TOKEN_PROGRAM  = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-_ATA_PROGRAM    = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1brs"
-_SYSTEM_PROGRAM = "11111111111111111111111111111111"
-# Arcium core framework program (getArciumProgramId() in SDK)
-_ARCIUM_PROGRAM = "Arcj82pX7HxYKLR92qvgZUAd7vGS1k4hQvAFcPATFdEQ"
-_MXE_PROGRAM_ID = "7fvHNYVuZP6EYt68GLUa4kU8f8dCBSaGafL9aDhhtMZN"
-_WSOL_MINT      = "So11111111111111111111111111111111111111112"
+_TOKEN_PROGRAM     = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+_ATA_PROGRAM       = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+_SYSTEM_PROGRAM    = "11111111111111111111111111111111"
+_MXE_PROGRAM_ID    = "7xeQNUggKc2e5q6AQxsFBLBkXGg2p54kSx11zVainMks"
+_WSOL_MINT         = "So11111111111111111111111111111111111111112"
+_USDC_MINT          = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
 
 def _get_ata(wallet: "Pubkey", mint: "Pubkey") -> "Pubkey":
@@ -364,6 +257,40 @@ def _get_ata(wallet: "Pubkey", mint: "Pubkey") -> "Pubkey":
     return ata
 
 
+def _account_exists(pubkey: "Pubkey") -> bool:
+    """Return True if account exists on chain at confirmed commitment."""
+    from rpc import rpc_call, _extract_result
+
+    resp = rpc_call("getAccountInfo", [
+        str(pubkey),
+        {"encoding": "base64", "commitment": "confirmed"},
+    ])
+    if resp is None or "error" in resp:
+        return False
+    return _extract_result(resp) is not None
+
+
+def _create_ata_ix(
+    payer_pubkey: "Pubkey",
+    owner_pubkey: "Pubkey",
+    mint_pubkey: "Pubkey",
+    ata_pubkey: "Pubkey",
+) -> "Instruction":
+    """Create an ATA via create_idempotent (no-op if already exists)."""
+    return Instruction(
+        program_id=Pubkey.from_string(_ATA_PROGRAM),
+        accounts=[
+            AccountMeta(pubkey=payer_pubkey, is_signer=True, is_writable=True),
+            AccountMeta(pubkey=ata_pubkey, is_signer=False, is_writable=True),
+            AccountMeta(pubkey=owner_pubkey, is_signer=False, is_writable=False),
+            AccountMeta(pubkey=mint_pubkey, is_signer=False, is_writable=False),
+            AccountMeta(pubkey=Pubkey.from_string(_SYSTEM_PROGRAM), is_signer=False, is_writable=False),
+            AccountMeta(pubkey=Pubkey.from_string(_TOKEN_PROGRAM), is_signer=False, is_writable=False),
+        ],
+        data=bytes([1]),  # discriminator 1 = create_idempotent
+    )
+
+
 def partial_sign_execute_payment(
     payer_keypair_path: str,
     beacon_pubkey_str: str,
@@ -372,6 +299,7 @@ def partial_sign_execute_payment(
     amount: int,
     mxe_pubkey_hex: str,
     mint_str: str,
+    treasury_str: str | None = None,
     broadcaster_token_account_str: str | None = None,
     program_id_str: str = _MXE_PROGRAM_ID,
     cluster_offset: int = 456,
@@ -381,9 +309,10 @@ def partial_sign_execute_payment(
     Build and partially sign a durable-nonce execute_payment transaction
     for the anon0mesh ble_revshare contract.
 
-    Instructions:
-      0: SystemProgram.advanceNonceAccount  (required first for durable nonces)
-      1: ExecutePayment on 7fvHNYVu...  (SPL token split 70/30 + Arcium MPC stats)
+        Instructions:
+            0: SystemProgram.advanceNonceAccount  (required first for durable nonces)
+            N: Optionally create missing ATAs for payer/recipient/broadcaster
+            N+1: ExecutePayment on the configured MXE program
 
     Signers: [payer (slot 0), beacon/broadcaster (slot 1)]
     Client fills slot 0 here; beacon fills slot 1 via cosignTransaction.
@@ -413,6 +342,8 @@ def partial_sign_execute_payment(
     prog_pubkey   = Pubkey.from_string(program_id_str)
     mint_pubkey   = Pubkey.from_string(mint_str)
     recipient_pk  = Pubkey.from_string(recipient_str)
+    # Treasury defaults to beacon/operator if not explicitly provided
+    treasury_pk   = Pubkey.from_string(treasury_str) if treasury_str else beacon_pubkey
 
     # Random u64 computation offset — uniquely identifies this Arcium computation
     comp_offset = int.from_bytes(_secrets.token_bytes(8), "little")
@@ -423,8 +354,10 @@ def partial_sign_execute_payment(
     except Exception as exc:
         log_err(f"Arcium encrypt failed: {exc}")
         return None
-    pub_key_hex = enc["pubkey_hex"]
-    nonce_bn    = int(enc["nonce_bn"])
+    pub_key_hex      = enc["pubkey_hex"]
+    nonce_bn         = int(enc["nonce_bn"])
+    # Rescue ciphertext for the amount — 32-byte field element passed to Arcium
+    encrypted_amount = bytes(enc["ciphertexts"][0])
 
     log_info("Fetching Arcium PDAs...")
     try:
@@ -436,55 +369,119 @@ def partial_sign_execute_payment(
     # Derive ATAs (Associated Token Accounts) — deterministic, no RPC needed
     payer_ta       = _get_ata(payer_pubkey,  mint_pubkey)
     recipient_ta   = _get_ata(recipient_pk,  mint_pubkey)
+    treasury_ta    = _get_ata(treasury_pk,   mint_pubkey)
     broadcaster_ta = (Pubkey.from_string(broadcaster_token_account_str)
                       if broadcaster_token_account_str
                       else _get_ata(beacon_pubkey, mint_pubkey))
 
-    # PDAs on the MXE program
-    sign_pda, _      = Pubkey.find_program_address([b"ArciumSignerAccount"], prog_pubkey)
+    # sign_pda_account: PDA derived from seeds=[b"ArciumSignerAccount"] on this program
+    sign_pda, _   = Pubkey.find_program_address([b"ArciumSignerAccount"], prog_pubkey)
     whitelist_pda, _ = Pubkey.find_program_address(
         [b"whitelist", bytes(mint_pubkey)], prog_pubkey
     )
 
-    # Instruction data layout:
-    # [disc 8B][comp_offset 8B LE][amount 8B LE][nonce 16B LE][pub_key 32B] = 72 bytes
+    # Instruction data layout (fixed contract):
+    # [disc 8B][comp_offset 8B LE][amount 8B LE][encrypted_amount 32B][nonce 16B LE][pub_key 32B] = 104 bytes
     disc      = hashlib.sha256(b"global:execute_payment").digest()[:8]
     ix_data   = (
         disc
         + comp_offset.to_bytes(8,  "little")
         + amount.to_bytes(8,       "little")
+        + encrypted_amount                      # 32-byte Rescue ciphertext of amount
         + nonce_bn.to_bytes(16,    "little")
         + bytes.fromhex(pub_key_hex)
     )
 
-    TOKEN_PROG  = Pubkey.from_string(_TOKEN_PROGRAM)
-    SYSTEM_PROG = Pubkey.from_string(_SYSTEM_PROGRAM)
-    ARCIUM_PROG = Pubkey.from_string(_ARCIUM_PROGRAM)
+    TOKEN_PROG          = Pubkey.from_string(_TOKEN_PROGRAM)
+    SYSTEM_PROG         = Pubkey.from_string(_SYSTEM_PROGRAM)
+    # arcium_program is hardcoded in the IDL — use the value from there, not the shim
+    ARCIUM_PROG         = Pubkey.from_string("Arcj82pX7HxYKLR92qvgZUAd7vGS1k4hQvAFcPATFdEQ")
+    MXE_ACCOUNT         = Pubkey.from_string(accs["mxeAccount"])
+    COMP_DEF_ACCOUNT    = Pubkey.from_string(accs["compDefAccount"])
+    MEMPOOL_ACCOUNT     = Pubkey.from_string(accs["mempoolAccount"])
+    EXECUTING_POOL      = Pubkey.from_string(accs["executingPool"])
+    COMPUTATION_ACCOUNT = Pubkey.from_string(accs["computationAccount"])
+    CLUSTER_ACCOUNT     = Pubkey.from_string(accs["clusterAccount"])
+    POOL_ACCOUNT        = Pubkey.from_string(accs["poolAccount"])
+    CLOCK_ACCOUNT       = Pubkey.from_string(accs["clockAccount"])
 
-    # Account order must match ExecutePayment context in the Rust program exactly
+    setup_ixs: list[Instruction] = []
+
+    if not _account_exists(COMP_DEF_ACCOUNT):
+        log_err("comp_def_account is not initialized for this program deployment")
+        log_err("Run the program's init_payment_stats_comp_def initializer once, then retry")
+        return None
+
+    # Track which ATAs have already been queued to avoid duplicate creates
+    # (e.g. when treasury == broadcaster, both resolve to the same ATA)
+    _queued_atas: set[str] = set()
+
+    def _maybe_create_ata(owner: "Pubkey", ata: "Pubkey", label: str) -> None:
+        key = str(ata)
+        if key in _queued_atas:
+            return
+        if not _account_exists(ata):
+            log_warn(f"{label} ATA missing; adding create ATA ix")
+            setup_ixs.append(_create_ata_ix(payer_pubkey, owner, mint_pubkey, ata))
+        _queued_atas.add(key)
+
+    _maybe_create_ata(payer_pubkey, payer_ta,    "Payer")
+    _maybe_create_ata(recipient_pk, recipient_ta, "Recipient")
+    _maybe_create_ata(treasury_pk,  treasury_ta,  "Treasury")
+
+    if broadcaster_token_account_str:
+        if not _account_exists(broadcaster_ta):
+            log_err("Provided broadcaster token account does not exist")
+            return None
+    else:
+        _maybe_create_ata(beacon_pubkey, broadcaster_ta, "Broadcaster")
+
+    # Account order matches the on-chain IDL for execute_payment exactly:
+    #  0 payer              writable signer
+    #  1 broadcaster        optional signer
+    #  2 recipient
+    #  3 mint
+    #  4 whitelist_entry    PDA [b"whitelist", mint]
+    #  5 payer_token_account        writable
+    #  6 recipient_token_account    writable
+    #  7 treasury_token_account     writable   ← was missing before
+    #  8 broadcaster_token_account  optional writable
+    #  9 sign_pda_account   writable PDA [b"ArciumSignerAccount"] on this program
+    # 10 mxe_account
+    # 11 mempool_account    writable
+    # 12 executing_pool     writable
+    # 13 computation_account writable
+    # 14 comp_def_account
+    # 15 cluster_account    writable
+    # 16 pool_account       writable  (hardcoded address in IDL)
+    # 17 clock_account      writable  (hardcoded address in IDL)
+    # 18 token_program
+    # 19 system_program
+    # 20 arcium_program     (hardcoded address in IDL)
     execute_ix = Instruction(
         program_id=prog_pubkey,
         accounts=[
-            AccountMeta(pubkey=payer_pubkey,                                    is_signer=True,  is_writable=True),
-            AccountMeta(pubkey=beacon_pubkey,                                   is_signer=True,  is_writable=False),  # broadcaster
-            AccountMeta(pubkey=recipient_pk,                                    is_signer=False, is_writable=False),
-            AccountMeta(pubkey=mint_pubkey,                                     is_signer=False, is_writable=False),
-            AccountMeta(pubkey=whitelist_pda,                                   is_signer=False, is_writable=False),
-            AccountMeta(pubkey=payer_ta,                                        is_signer=False, is_writable=True),
-            AccountMeta(pubkey=recipient_ta,                                    is_signer=False, is_writable=True),
-            AccountMeta(pubkey=broadcaster_ta,                                  is_signer=False, is_writable=True),
-            AccountMeta(pubkey=sign_pda,                                        is_signer=False, is_writable=True),
-            AccountMeta(pubkey=Pubkey.from_string(accs["mxeAccount"]),          is_signer=False, is_writable=False),
-            AccountMeta(pubkey=Pubkey.from_string(accs["mempoolAccount"]),      is_signer=False, is_writable=True),
-            AccountMeta(pubkey=Pubkey.from_string(accs["executingPool"]),       is_signer=False, is_writable=True),
-            AccountMeta(pubkey=Pubkey.from_string(accs["computationAccount"]),  is_signer=False, is_writable=True),
-            AccountMeta(pubkey=Pubkey.from_string(accs["compDefAccount"]),      is_signer=False, is_writable=False),
-            AccountMeta(pubkey=Pubkey.from_string(accs["clusterAccount"]),      is_signer=False, is_writable=True),
-            AccountMeta(pubkey=Pubkey.from_string(accs["poolAccount"]),         is_signer=False, is_writable=True),
-            AccountMeta(pubkey=Pubkey.from_string(accs["clockAccount"]),        is_signer=False, is_writable=True),
-            AccountMeta(pubkey=TOKEN_PROG,                                      is_signer=False, is_writable=False),
-            AccountMeta(pubkey=SYSTEM_PROG,                                     is_signer=False, is_writable=False),
-            AccountMeta(pubkey=ARCIUM_PROG,                                     is_signer=False, is_writable=False),
+            AccountMeta(pubkey=payer_pubkey,          is_signer=True,  is_writable=True),
+            AccountMeta(pubkey=beacon_pubkey,          is_signer=True,  is_writable=False),
+            AccountMeta(pubkey=recipient_pk,           is_signer=False, is_writable=False),
+            AccountMeta(pubkey=mint_pubkey,            is_signer=False, is_writable=False),
+            AccountMeta(pubkey=whitelist_pda,          is_signer=False, is_writable=False),
+            AccountMeta(pubkey=payer_ta,               is_signer=False, is_writable=True),
+            AccountMeta(pubkey=recipient_ta,           is_signer=False, is_writable=True),
+            AccountMeta(pubkey=treasury_ta,            is_signer=False, is_writable=True),
+            AccountMeta(pubkey=broadcaster_ta,         is_signer=False, is_writable=True),
+            AccountMeta(pubkey=sign_pda,               is_signer=False, is_writable=True),
+            AccountMeta(pubkey=MXE_ACCOUNT,            is_signer=False, is_writable=False),
+            AccountMeta(pubkey=MEMPOOL_ACCOUNT,        is_signer=False, is_writable=True),
+            AccountMeta(pubkey=EXECUTING_POOL,         is_signer=False, is_writable=True),
+            AccountMeta(pubkey=COMPUTATION_ACCOUNT,    is_signer=False, is_writable=True),
+            AccountMeta(pubkey=COMP_DEF_ACCOUNT,       is_signer=False, is_writable=False),
+            AccountMeta(pubkey=CLUSTER_ACCOUNT,        is_signer=False, is_writable=True),
+            AccountMeta(pubkey=POOL_ACCOUNT,           is_signer=False, is_writable=True),
+            AccountMeta(pubkey=CLOCK_ACCOUNT,          is_signer=False, is_writable=True),
+            AccountMeta(pubkey=TOKEN_PROG,             is_signer=False, is_writable=False),
+            AccountMeta(pubkey=SYSTEM_PROG,            is_signer=False, is_writable=False),
+            AccountMeta(pubkey=ARCIUM_PROG,            is_signer=False, is_writable=False),
         ],
         data=ix_data,
     )
@@ -505,7 +502,7 @@ def partial_sign_execute_payment(
         authorized_pubkey=payer_pubkey,
     ))
 
-    msg = Message.new_with_blockhash([advance_ix, execute_ix], payer_pubkey, nonce_hash)
+    msg = Message.new_with_blockhash([advance_ix, *setup_ixs, execute_ix], payer_pubkey, nonce_hash)
     tx  = Transaction.new_unsigned(msg)
 
     # Partial sign — payer fills slot 0; beacon (broadcaster) fills slot 1
@@ -517,9 +514,12 @@ def partial_sign_execute_payment(
     print(f"  Broadcaster:  {beacon_pubkey}  (beacon co-signs)")
     print(f"  Recipient:    {recipient_pk}")
     print(f"  Mint:         {mint_pubkey}")
+    print(f"  Treasury:     {treasury_pk}")
     print(f"  Payer TA:     {payer_ta}")
     print(f"  Recipient TA: {recipient_ta}")
+    print(f"  Treasury TA:  {treasury_ta}")
     print(f"  Bcaster TA:   {broadcaster_ta}")
+    print(f"  sign_pda:     {sign_pda}")
     print(f"  {DIM}Durable nonce — tx won't expire on mesh.{RESET}")
     print(f"  {DIM}Sending to beacon for co-signature...{RESET}\n")
     return tx_b64

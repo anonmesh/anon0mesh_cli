@@ -159,7 +159,8 @@ def _handle_cosign_transaction(params: list, req_id: int, count: int) -> bytes:
         return build_response(error=f"Co-sign failed: {exc}", req_id=req_id)
 
     submit_req   = {"jsonrpc": "2.0", "id": req_id, "method": "sendTransaction",
-                    "params": [fully_signed_b64, {"encoding": "base64"}]}
+                    "params": [fully_signed_b64, {"encoding": "base64", "skipPreflight": True,
+                                                  "preflightCommitment": "confirmed"}]}
     result_bytes = forward_plain_rpc(submit_req, req_id, count, "sendTransaction[co-signed]")
     return result_bytes
 
@@ -254,6 +255,9 @@ def forward_plain_rpc(req: dict, req_id: int, count: int, method: str) -> bytes:
                 log_ok(f"[#{count}] Solana ✔  method={method}  type={type(parsed['result']).__name__}")
             elif "error" in parsed:
                 log_warn(f"[#{count}] Solana error: {parsed['error'].get('message', '?')}")
+                logs = parsed["error"].get("data", {}) or {}
+                for line in (logs.get("logs") or []):
+                    log_warn(f"  sim> {line}")
         except Exception:
             pass
         return http_resp.content
@@ -452,7 +456,7 @@ def _test_arcium() -> None:
     print()
     if arcium and arcium.enabled:
         log_ok("Arcium MPC ACTIVE — payment stats will be logged after sendTransaction")
-        log_info("  Program:    7fvHNYVuZP6EYt68GLUa4kU8f8dCBSaGafL9aDhhtMZN")
+        log_info("  Program:    7xeQNUggKc2e5q6AQxsFBLBkXGg2p54kSx11zVainMks")
         log_info("  Instruction: execute_payment (logs encrypted amount via MPC)")
         log_info("  Triggered by: sendTransaction with arcium metadata in params")
     else:

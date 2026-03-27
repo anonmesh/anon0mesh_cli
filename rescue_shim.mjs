@@ -3,7 +3,7 @@
  * rescue_shim.mjs — Arcium helper shim for anon0mesh beacon
  * ===========================================================
  * Built from the actual anon0mesh contract:
- *   Program ID:  7fvHNYVuZP6EYt68GLUa4kU8f8dCBSaGafL9aDhhtMZN  (declare_id! in lib.rs)
+ *   Program ID:  7xeQNUggKc2e5q6AQxsFBLBkXGg2p54kSx11zVainMks  (declare_id! in lib.rs)
  *   Instruction: execute_payment(computation_offset, amount, nonce, pub_key)
  *   Purpose:     Log encrypted payment stats via Arcium MPC after a tx relays
  *
@@ -32,12 +32,10 @@ const [,, cmd, ...args] = process.argv;
 
 // ── Constants from the real contract ──────────────────────────────────────────
 // declare_id! in programs/ble-revshare/src/lib.rs + Anchor.toml [programs.devnet]
-const MXE_PROGRAM_ID = "7fvHNYVuZP6EYt68GLUa4kU8f8dCBSaGafL9aDhhtMZN";
+const MXE_PROGRAM_ID = "7xeQNUggKc2e5q6AQxsFBLBkXGg2p54kSx11zVainMks";
 
-// Hardcoded in contract:
-// const ARCIUM_SIGNER_PDA: Pubkey = Pubkey::new_from_array([...])
-// = nhy7kthZGJjV3yqbyPuSeo2KhNriia4DQrii8jW3KcC
-const ARCIUM_SIGNER_PDA = "nhy7kthZGJjV3yqbyPuSeo2KhNriia4DQrii8jW3KcC";
+// sign_pda_account: PDA derived from seeds=[b"ArciumSignerAccount"] on the MXE program
+// find_program_address(["ArciumSignerAccount"], MXE_PROGRAM_ID)
 
 // comp_def_offset("payment_stats")
 const COMP_DEF_NAME = "payment_stats";
@@ -139,6 +137,9 @@ try {
         const computationOffset = new BN(computationOffsetStr || "0");
         const progPubkey        = new PublicKey(programId);
         const compDefOffset     = Buffer.from(getCompDefAccOffset(COMP_DEF_NAME)).readUInt32LE();
+        const [signPdaPubkey]   = PublicKey.findProgramAddressSync(
+            [Buffer.from("ArciumSignerAccount")], progPubkey
+        );
 
         out({
             computationAccount: getComputationAccAddress(clusterOffset, computationOffset).toBase58(),
@@ -149,27 +150,29 @@ try {
             compDefAccount:     getCompDefAccAddress(progPubkey, compDefOffset).toBase58(),
             poolAccount:        getFeePoolAccAddress().toBase58(),
             clockAccount:       getClockAccAddress().toBase58(),
-            signPda:            ARCIUM_SIGNER_PDA,
+            arciumProgramId:    getArciumProgramId().toBase58(),
+            signPda:            signPdaPubkey.toBase58(),
             compDefOffset,
         });
 
     } else if (cmd === "execute_payment") {
         // ── Build + sign + send execute_payment instruction ────────────────────
-        // Matches contract exactly:
-        //   execute_payment(computation_offset: u64, amount: u64, nonce: u128, pub_key: [u8;32])
+        // Matches FIXED contract:
+        //   execute_payment(computation_offset: u64, amount: u64, encrypted_amount: [u8;32],
+        //                   nonce: u128, pub_key: [u8;32])
         //
-        // Instruction data layout (from useBleRevshareContract.ts):
-        //   [discriminator 8B][computation_offset 8B LE][amount 8B LE][nonce 16B LE][pub_key 32B]
+        // Instruction data layout:
+        //   [discriminator 8B][computation_offset 8B LE][amount 8B LE]
+        //   [encrypted_amount 32B][nonce 16B LE][pub_key 32B]  = 104 bytes
         //
-        // Called by the beacon AFTER successfully relaying a sendTransaction,
-        // to log encrypted payment statistics via Arcium MPC.
+        // The shim encrypts amount locally using the MXE pubkey (x25519 + RescueCipher).
         //
         // Args JSON passed via stdin (contains payerKeypairHex — kept off arg list):
         // {
         //   rpcUrl, programId?, payerKeypairHex, clusterOffset?,
-        //   amount, pubKeyHex, nonceBn,
+        //   amount, mxePubkeyHex,
         //   recipientB58, mintB58,
-        //   payerTokenAccountB58, recipientTokenAccountB58,
+        //   payerTokenAccountB58, recipientTokenAccountB58, treasuryTokenAccountB58,
         //   broadcasterB58?, broadcasterKeypairHex?, broadcasterTokenAccountB58?
         // }
         const argsJson = readStdin();
@@ -178,20 +181,22 @@ try {
         const p = JSON.parse(argsJson);
         const {
             rpcUrl,
-            programId:          progIdArg,
+            programId:              progIdArg,
             payerKeypairHex,
-            clusterOffset:      clusterOffStr,
+            clusterOffset:          clusterOffStr,
             amount,
-            pubKeyHex,
-            nonceBn,
+            mxePubkeyHex,
             recipientB58,
             mintB58,
             payerTokenAccountB58,
             recipientTokenAccountB58,
+            treasuryTokenAccountB58,
             broadcasterB58,
             broadcasterKeypairHex,
             broadcasterTokenAccountB58,
         } = p;
+
+        if (!mxePubkeyHex) fail("mxePubkeyHex is required for encryption");
 
         const {
             Connection, PublicKey, Keypair,
@@ -207,6 +212,17 @@ try {
         try { clusterOffset = getArciumEnv().arciumClusterOffset; }
         catch { clusterOffset = Number.parseInt(clusterOffStr || "456"); }
 
+        // Encrypt amount with x25519 + RescueCipher (client-side, using MXE pubkey)
+        const mxePublicKey  = u8a(mxePubkeyHex);
+        const clientPrivKey = x25519.utils.randomSecretKey();
+        const clientPubKey  = x25519.getPublicKey(clientPrivKey);
+        const sharedSecret  = x25519.getSharedSecret(clientPrivKey, mxePublicKey);
+        const rescueCipher  = new RescueCipher(sharedSecret);
+        const encNonce      = randomBytes(16);
+        const ciphertexts   = rescueCipher.encrypt([BigInt(amount)], encNonce);
+        const encryptedAmountBuf = Buffer.from(ciphertexts[0]);           // 32-byte field element
+        const nonceBig      = deserializeLE(Buffer.from(encNonce));       // u128 as BigInt
+
         // Random 8-byte computation offset
         const compOffsetBN  = new BN(randomBytes(8), "hex");
         const compDefOffset = Buffer.from(getCompDefAccOffset(COMP_DEF_NAME)).readUInt32LE();
@@ -220,7 +236,9 @@ try {
         const compDefAccount     = getCompDefAccAddress(progPubkey, compDefOffset);
         const poolAccount        = getFeePoolAccAddress();
         const clockAccount       = getClockAccAddress();
-        const signPda            = new PublicKey(ARCIUM_SIGNER_PDA);
+        const [signPda]          = PublicKey.findProgramAddressSync(
+            [Buffer.from("ArciumSignerAccount")], progPubkey
+        );
 
         // Whitelist PDA: seeds = [b"whitelist", mint]
         const mint = new PublicKey(mintB58);
@@ -228,49 +246,63 @@ try {
             [Buffer.from("whitelist"), mint.toBuffer()], progPubkey
         );
 
-        // Instruction data layout from useBleRevshareContract.ts createPaymentTransaction():
-        //   [discriminator 8B][computation_offset 8B LE][amount 8B LE][nonce 16B LE][pub_key 32B]
-        const ix_data = Buffer.alloc(8 + 8 + 8 + 16 + 32);
+        // Instruction data layout (fixed contract — 104 bytes):
+        //   [disc 8B][comp_offset 8B LE][amount 8B LE][encrypted_amount 32B][nonce 16B LE][pub_key 32B]
+        const ix_data = Buffer.alloc(8 + 8 + 8 + 32 + 16 + 32);
         disc("execute_payment").copy(ix_data, 0);
         ix_data.writeBigUInt64LE(BigInt(compOffsetBN.toString()), 8);
         ix_data.writeBigUInt64LE(BigInt(amount), 16);
-        // nonce as u128 LE (two u64s)
-        const nonceBig = BigInt(nonceBn);
-        ix_data.writeBigUInt64LE(nonceBig & 0xFFFFFFFFFFFFFFFFn, 24);
-        ix_data.writeBigUInt64LE(nonceBig >> 64n, 32);
-        Buffer.from(u8a(pubKeyHex)).copy(ix_data, 40);
+        encryptedAmountBuf.copy(ix_data, 24);                             // 32-byte ciphertext
+        // nonce as u128 LE at offset 56 (two u64s)
+        ix_data.writeBigUInt64LE(nonceBig & 0xFFFFFFFFFFFFFFFFn, 56);
+        ix_data.writeBigUInt64LE(nonceBig >> 64n, 64);
+        Buffer.from(clientPubKey).copy(ix_data, 72);                      // 32-byte x25519 pubkey
 
-        const recipient    = new PublicKey(recipientB58);
-        const payerTA      = new PublicKey(payerTokenAccountB58);
-        const recipientTA  = new PublicKey(recipientTokenAccountB58);
-        const broadcaster  = broadcasterB58 ? new PublicKey(broadcasterB58) : null;
-        const broadcasterTA = broadcasterTokenAccountB58 ? new PublicKey(broadcasterTokenAccountB58) : null;
+        const recipient      = new PublicKey(recipientB58);
+        const payerTA        = new PublicKey(payerTokenAccountB58);
+        const recipientTA    = new PublicKey(recipientTokenAccountB58);
+        const broadcaster    = broadcasterB58 ? new PublicKey(broadcasterB58) : null;
+        const broadcasterPub = broadcaster || payerKp.publicKey;
 
+        // Derive broadcaster ATA — mirrors wallet.py: treasury_pk defaults to beacon_pubkey
+        const ATA_PROGRAM_PK = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+        const [derivedBcasterTA] = PublicKey.findProgramAddressSync(
+            [broadcasterPub.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), mint.toBuffer()],
+            ATA_PROGRAM_PK
+        );
+
+        const broadcasterTA = broadcasterTokenAccountB58
+            ? new PublicKey(broadcasterTokenAccountB58)
+            : derivedBcasterTA;
+
+        // Treasury defaults to broadcaster's ATA (mirrors wallet.py: treasury_pk = beacon_pubkey)
+        const treasuryTA = new PublicKey(
+            treasuryTokenAccountB58 || broadcasterTokenAccountB58 || derivedBcasterTA.toBase58()
+        );
+
+        // Account order matches on-chain IDL for execute_payment exactly (21 accounts):
         const keys = [
-            { pubkey: payerKp.publicKey, isSigner: true,        isWritable: true  },
-            // Optional broadcaster — pass pubkey as non-signer if not signing
-            { pubkey: broadcaster || payerKp.publicKey,
-              isSigner: !!broadcasterKeypairHex, isWritable: false },
-            { pubkey: recipient,         isSigner: false,        isWritable: false },
-            { pubkey: mint,              isSigner: false,        isWritable: false },
-            { pubkey: whitelistEntry,    isSigner: false,        isWritable: false },
-            { pubkey: payerTA,           isSigner: false,        isWritable: true  },
-            { pubkey: recipientTA,       isSigner: false,        isWritable: true  },
-            // Optional broadcaster token account
-            { pubkey: broadcasterTA || payerTA, isSigner: false, isWritable: !!broadcasterTA },
-            { pubkey: signPda,           isSigner: false,        isWritable: true  },
-            { pubkey: mxeAccount,        isSigner: false,        isWritable: false },
-            { pubkey: mempoolAccount,    isSigner: false,        isWritable: true  },
-            { pubkey: executingPool,     isSigner: false,        isWritable: true  },
-            { pubkey: computationAccount,isSigner: false,        isWritable: true  },
-            { pubkey: compDefAccount,    isSigner: false,        isWritable: false },
-            { pubkey: clusterAccount,    isSigner: false,        isWritable: true  },
-            { pubkey: poolAccount,       isSigner: false,        isWritable: true  },
-            { pubkey: clockAccount,      isSigner: false,        isWritable: true  },
-            { pubkey: TOKEN_PROGRAM_ID,  isSigner: false,        isWritable: false },
-            { pubkey: SystemProgram.programId, isSigner: false,  isWritable: false },
-            // arcium_program: Arcium core framework program resolved via SDK
-            { pubkey: getArciumProgramId(), isSigner: false, isWritable: false },
+            { pubkey: payerKp.publicKey,                            isSigner: true,             isWritable: true  },
+            { pubkey: broadcaster || payerKp.publicKey,             isSigner: !!broadcasterKeypairHex, isWritable: false },
+            { pubkey: recipient,                                    isSigner: false,            isWritable: false },
+            { pubkey: mint,                                         isSigner: false,            isWritable: false },
+            { pubkey: whitelistEntry,                               isSigner: false,            isWritable: false },
+            { pubkey: payerTA,                                      isSigner: false,            isWritable: true  },
+            { pubkey: recipientTA,                                  isSigner: false,            isWritable: true  },
+            { pubkey: treasuryTA,                                   isSigner: false,            isWritable: true  },
+            { pubkey: broadcasterTA,                                isSigner: false,            isWritable: true  },
+            { pubkey: signPda,                                      isSigner: false,            isWritable: true  },
+            { pubkey: mxeAccount,                                   isSigner: false,            isWritable: false },
+            { pubkey: mempoolAccount,                               isSigner: false,            isWritable: true  },
+            { pubkey: executingPool,                                isSigner: false,            isWritable: true  },
+            { pubkey: computationAccount,                           isSigner: false,            isWritable: true  },
+            { pubkey: compDefAccount,                               isSigner: false,            isWritable: false },
+            { pubkey: clusterAccount,                               isSigner: false,            isWritable: true  },
+            { pubkey: poolAccount,                                  isSigner: false,            isWritable: true  },
+            { pubkey: clockAccount,                                 isSigner: false,            isWritable: true  },
+            { pubkey: TOKEN_PROGRAM_ID,                             isSigner: false,            isWritable: false },
+            { pubkey: SystemProgram.programId,                      isSigner: false,            isWritable: false },
+            { pubkey: getArciumProgramId(),                         isSigner: false,            isWritable: false },
         ];
 
         const ix  = new TransactionInstruction({ keys, programId: progPubkey, data: ix_data });
