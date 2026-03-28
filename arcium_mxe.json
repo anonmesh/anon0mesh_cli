@@ -73,6 +73,10 @@
           "writable": true
         },
         {
+          "name": "treasury_token_account",
+          "writable": true
+        },
+        {
           "name": "broadcaster_token_account",
           "writable": true,
           "optional": true
@@ -164,6 +168,15 @@
           "type": "u64"
         },
         {
+          "name": "encrypted_amount",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
           "name": "nonce",
           "type": "u128"
         },
@@ -203,6 +216,13 @@
         {
           "name": "comp_def_account",
           "writable": true
+        },
+        {
+          "name": "address_lookup_table",
+          "writable": true
+        },
+        {
+          "name": "lut_program"
         },
         {
           "name": "arcium_program",
@@ -503,6 +523,21 @@
       "code": 6003,
       "name": "ClusterNotSet",
       "msg": "The cluster is not set"
+    },
+    {
+      "code": 6004,
+      "name": "InvalidTokenAccount",
+      "msg": "A token account had an unexpected owner or mint"
+    },
+    {
+      "code": 6005,
+      "name": "MathOverflow",
+      "msg": "Arithmetic overflow while computing payment shares"
+    },
+    {
+      "code": 6006,
+      "name": "InvalidTreasury",
+      "msg": "The treasury token account does not belong to the expected treasury wallet"
     }
   ],
   "types": [
@@ -919,16 +954,8 @@
             }
           },
           {
-            "name": "fallback_clusters",
-            "type": {
-              "vec": "u32"
-            }
-          },
-          {
-            "name": "rejected_clusters",
-            "type": {
-              "vec": "u32"
-            }
+            "name": "lut_offset_slot",
+            "type": "u64"
           },
           {
             "name": "computation_definitions",
@@ -998,7 +1025,7 @@
             "name": "Active"
           },
           {
-            "name": "Recovery"
+            "name": "Migration"
           }
         ]
       }

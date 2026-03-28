@@ -2,7 +2,7 @@
 arcium_client.py — Arcium MPC integration for the anon0mesh beacon
 ====================================================================
 Based on the actual anon0mesh contract:
-  Program ID:  7fvHNYVuZP6EYt68GLUa4kU8f8dCBSaGafL9aDhhtMZN
+  Program ID:  7xeQNUggKc2e5q6AQxsFBLBkXGg2p54kSx11zVainMks
   Instruction: execute_payment(computation_offset, amount, nonce, pub_key)
   Purpose:     Log ENCRYPTED payment statistics after a transaction is relayed
 
@@ -50,11 +50,12 @@ except ImportError:
 from shared import log_info, log_ok, log_warn, log_err
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-# From declare_id! in the contract
-MXE_PROGRAM_ID         = "7fvHNYVuZP6EYt68GLUa4kU8f8dCBSaGafL9aDhhtMZN"
+# declare_id! in programs/ble-revshare/src/lib.rs + Anchor.toml [programs.devnet]
+MXE_PROGRAM_ID         = "7xeQNUggKc2e5q6AQxsFBLBkXGg2p54kSx11zVainMks"
 
-# Hardcoded in the contract as ARCIUM_SIGNER_PDA
-ARCIUM_SIGNER_PDA      = "nhy7kthZGJjV3yqbyPuSeo2KhNriia4DQrii8jW3KcC"
+# sign_pda_account: find_program_address([b"ArciumSignerAccount"], MXE_PROGRAM_ID)
+# = 4VubmLaMEPnyPXURZYPRQANwNWDTq8Jzn1Bj3YUo9zi7  (bump 255)
+ARCIUM_SIGNER_PDA      = "4VubmLaMEPnyPXURZYPRQANwNWDTq8Jzn1Bj3YUo9zi7"
 
 CLUSTER_OFFSET_DEVNET  = 456
 CLUSTER_OFFSET_MAINNET = 2026
@@ -150,6 +151,7 @@ class ArciumBeaconClient:
         self.cluster_offset = cluster_offset
         self.program_id     = program_id
         self._payer_hex     = bytes(payer_keypair).hex()
+        self._payer_b58     = str(payer_keypair.pubkey())
         self._client: Optional[AsyncClient] = None
 
     async def connect(self) -> None:
@@ -174,28 +176,31 @@ class ArciumBeaconClient:
         Generates a fresh x25519 keypair per call — the nonce and pubkey are
         included in the instruction so Arcium MPC can decrypt the amount.
         """
-        import random
-
-        # Generate ephemeral x25519 keypair for this payment stat entry
-        enc = rescue_encrypt(self.mxe_pubkey_hex, [amount])
-        pub_key_hex = enc["pubkey_hex"]
-        nonce_bn    = enc["nonce_bn"]
-
         log_info(f"Logging payment stats  amount={amount}  via Arcium MPC")
 
+        # Beacon is always the broadcaster (it relayed the tx) — use its keypair
+        # so it actually co-signs execute_payment and receives the revenue share.
+        broadcaster          = broadcaster or self._payer_b58
+        broadcaster_kp_hex   = self._payer_hex
+        if not broadcaster_token_account:
+            broadcaster_token_account = os.getenv("ARCIUM_BROADCASTER_TOKEN_ACCOUNT") or None
+        treasury_token_account = os.getenv("ARCIUM_TREASURY_TOKEN_ACCOUNT") or None
+
+        # The shim handles encryption (x25519 + RescueCipher) using mxePubkeyHex directly.
         shim_args = json.dumps({
-            "rpcUrl":                    self.rpc_url,
-            "programId":                 self.program_id,
-            "payerKeypairHex":           self._payer_hex,
-            "clusterOffset":             str(self.cluster_offset),
-            "amount":                    str(amount),
-            "pubKeyHex":                 pub_key_hex,
-            "nonceBn":                   nonce_bn,
-            "recipientB58":              recipient,
-            "mintB58":                   mint,
-            "payerTokenAccountB58":      payer_token_account,
-            "recipientTokenAccountB58":  recipient_token_account,
-            "broadcasterB58":            broadcaster,
+            "rpcUrl":                     self.rpc_url,
+            "programId":                  self.program_id,
+            "payerKeypairHex":            self._payer_hex,
+            "clusterOffset":              str(self.cluster_offset),
+            "amount":                     str(amount),
+            "mxePubkeyHex":              self.mxe_pubkey_hex,
+            "recipientB58":               recipient,
+            "mintB58":                    mint,
+            "payerTokenAccountB58":       payer_token_account,
+            "recipientTokenAccountB58":   recipient_token_account,
+            "treasuryTokenAccountB58":    treasury_token_account,
+            "broadcasterB58":             broadcaster,
+            "broadcasterKeypairHex":      broadcaster_kp_hex,
             "broadcasterTokenAccountB58": broadcaster_token_account,
         })
 

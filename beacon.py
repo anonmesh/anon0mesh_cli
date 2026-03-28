@@ -159,28 +159,9 @@ def _handle_cosign_transaction(params: list, req_id: int, count: int) -> bytes:
         return build_response(error=f"Co-sign failed: {exc}", req_id=req_id)
 
     submit_req   = {"jsonrpc": "2.0", "id": req_id, "method": "sendTransaction",
-                    "params": [fully_signed_b64, {"encoding": "base64"}]}
+                    "params": [fully_signed_b64, {"encoding": "base64", "skipPreflight": True,
+                                                  "preflightCommitment": "confirmed"}]}
     result_bytes = forward_plain_rpc(submit_req, req_id, count, "sendTransaction[co-signed]")
-
-    # Fire-and-forget Arcium stats (same as the plain sendTransaction path)
-    arcium_meta = params[1].get("arcium", {}) if len(params) > 1 and isinstance(params[1], dict) else {}
-    if arcium and arcium.enabled and arcium_meta.get("amount") and arcium_meta.get("mint"):
-        try:
-            parsed = decode_json(result_bytes)
-            if "result" in parsed and isinstance(parsed["result"], str):
-                arcium.log_payment_stats(
-                    amount                    = int(arcium_meta["amount"]),
-                    payer_token_account       = arcium_meta.get("payer_ta", ""),
-                    recipient                 = arcium_meta.get("recipient", ""),
-                    recipient_token_account   = arcium_meta.get("recipient_ta", ""),
-                    mint                      = arcium_meta["mint"],
-                    broadcaster               = arcium_meta.get("broadcaster"),
-                    broadcaster_token_account = arcium_meta.get("broadcaster_ta"),
-                )
-                log_info(f"[#{count}] Arcium payment stats queued (co-sign path)")
-        except Exception:
-            pass
-
     return result_bytes
 
 
@@ -193,30 +174,58 @@ def _dispatch_cosign(method: str, params: list, req_id: int, count: int) -> "byt
     return None
 
 
+def _resolve_arcium_meta(params: list) -> dict:
+    """Extract arcium metadata from params and fill missing token fields from env."""
+    meta = {}
+    if len(params) > 1 and isinstance(params[1], dict):
+        meta = params[1].get("arcium", {})
+    if not meta.get("mint"):
+        meta = dict(meta, mint=os.getenv("ARCIUM_MINT", ""))
+    if not meta.get("payer_ta"):
+        meta = dict(meta, payer_ta=os.getenv("ARCIUM_PAYER_TOKEN_ACCOUNT", ""))
+    if not meta.get("recipient_ta"):
+        meta = dict(meta, recipient_ta=os.getenv("ARCIUM_RECIPIENT_TOKEN_ACCOUNT", ""))
+    if not meta.get("broadcaster_ta"):
+        v = os.getenv("ARCIUM_BROADCASTER_TOKEN_ACCOUNT", "")
+        if v:
+            meta = dict(meta, broadcaster_ta=v)
+    return meta
+
+
+def _fire_arcium_stats(meta: dict, count: int, label: str) -> None:
+    """Call arcium.log_payment_stats if amount, mint, and payer_ta are present."""
+    if not arcium or not arcium.enabled:
+        return
+    missing = [k for k in ("amount", "mint", "payer_ta") if not meta.get(k)]
+    if missing:
+        log_warn(f"[#{count}] Arcium skipped — missing: {', '.join(missing)}"
+                 f"  (set ARCIUM_MINT / ARCIUM_PAYER_TOKEN_ACCOUNT in .env)")
+        return
+    try:
+        arcium.log_payment_stats(
+            amount                    = int(meta["amount"]),
+            payer_token_account       = meta["payer_ta"],
+            recipient                 = meta.get("recipient", ""),
+            recipient_token_account   = meta.get("recipient_ta", ""),
+            mint                      = meta["mint"],
+            broadcaster               = meta.get("broadcaster"),
+            broadcaster_token_account = meta.get("broadcaster_ta"),
+        )
+        log_info(f"[#{count}] Arcium payment stats queued ({label})")
+    except Exception as exc:
+        log_err(f"[#{count}] Arcium execute_payment failed: {exc}")
+
+
 def _maybe_log_arcium_stats(params: list, result_bytes: bytes, count: int) -> None:
     """
     Fire-and-forget: log encrypted payment stats to the Arcium MXE after a
     successful sendTransaction.  Never raises — must not block the response.
-    Client may pass optional metadata as params[1] = {"arcium": {...}}.
     """
     try:
         parsed_result = decode_json(result_bytes)
         if not ("result" in parsed_result and isinstance(parsed_result["result"], str)):
             return
-        arcium_meta = {}
-        if len(params) > 1 and isinstance(params[1], dict):
-            arcium_meta = params[1].get("arcium", {})
-        if arcium_meta.get("amount") and arcium_meta.get("mint"):
-            arcium.log_payment_stats(
-                amount                    = int(arcium_meta["amount"]),
-                payer_token_account       = arcium_meta.get("payer_ta", ""),
-                recipient                 = arcium_meta.get("recipient", ""),
-                recipient_token_account   = arcium_meta.get("recipient_ta", ""),
-                mint                      = arcium_meta["mint"],
-                broadcaster               = arcium_meta.get("broadcaster"),
-                broadcaster_token_account = arcium_meta.get("broadcaster_ta"),
-            )
-            log_info(f"[#{count}] Arcium payment stats queued (fire-and-forget)")
+        _fire_arcium_stats(_resolve_arcium_meta(params), count, "fire-and-forget")
     except Exception:
         pass
 
@@ -246,6 +255,9 @@ def forward_plain_rpc(req: dict, req_id: int, count: int, method: str) -> bytes:
                 log_ok(f"[#{count}] Solana ✔  method={method}  type={type(parsed['result']).__name__}")
             elif "error" in parsed:
                 log_warn(f"[#{count}] Solana error: {parsed['error'].get('message', '?')}")
+                logs = parsed["error"].get("data", {}) or {}
+                for line in (logs.get("logs") or []):
+                    log_warn(f"  sim> {line}")
         except Exception:
             pass
         return http_resp.content
@@ -444,7 +456,7 @@ def _test_arcium() -> None:
     print()
     if arcium and arcium.enabled:
         log_ok("Arcium MPC ACTIVE — payment stats will be logged after sendTransaction")
-        log_info("  Program:    7fvHNYVuZP6EYt68GLUa4kU8f8dCBSaGafL9aDhhtMZN")
+        log_info("  Program:    7xeQNUggKc2e5q6AQxsFBLBkXGg2p54kSx11zVainMks")
         log_info("  Instruction: execute_payment (logs encrypted amount via MPC)")
         log_info("  Triggered by: sendTransaction with arcium metadata in params")
     else:
