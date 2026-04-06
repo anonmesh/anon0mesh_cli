@@ -504,7 +504,7 @@ except Exception as e:
 try:
     import menu
     assert callable(menu.repl)
-    assert isinstance(menu._MENU_SECTIONS, list)
+    assert isinstance(menu.MENU, list)
 except Exception as e:
     errors.append(f'menu: {e}')
 
