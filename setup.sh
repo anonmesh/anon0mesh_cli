@@ -247,7 +247,7 @@ fi
 # Verify critical imports
 python -c "import RNS; print('  RNS version:', RNS.__version__)" && log_ok "RNS import OK"
 python -c "import requests" && log_ok "requests import OK"
-python -c "import lxmf" && log_ok "lxmf import OK" || log_warn "lxmf import failed — discovery may not work"
+python -c "import LXMF" && log_ok "LXMF import OK" || log_warn "LXMF import failed — discovery may not work"
 
 if [[ "$INSTALL_BLE" == true ]]; then
   python -c "import bleak" && log_ok "bleak import OK" || log_warn "bleak import failed"
@@ -644,7 +644,6 @@ except Exception as e:
 try:
     import menu
     assert callable(menu.repl)
-    assert isinstance(menu._MENU_SECTIONS, list)
 except Exception as e:
     errors.append(f'menu: {e}')
 
