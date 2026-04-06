@@ -13,6 +13,9 @@ requests>=2.31.0
 # Terminal QR code display (wallet address in menu)
 qrcode>=7.4.2
 
+# SSL cert fallback (beacon.py — certifi.where() for HTTPS to Solana RPC)
+certifi
+
 # Optional: offline transaction signing
 # Uncomment if you want to use --sign-offline on the client
 # solders>=0.20.0

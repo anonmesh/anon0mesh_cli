@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 rpc.py — Solana JSON-RPC helpers
 ==================================

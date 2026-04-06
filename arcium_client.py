@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 arcium_client.py — Arcium MPC integration for the anon0mesh beacon
 ====================================================================

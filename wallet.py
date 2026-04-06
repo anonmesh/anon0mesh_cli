@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 wallet.py — keypair management and offline transaction signing
 ===============================================================

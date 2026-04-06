@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 state.py — shared mutable runtime state
 ========================================
