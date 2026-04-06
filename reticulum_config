@@ -1,54 +1,59 @@
-# ~/.reticulum/config
-# ─────────────────────────────────────────────────────────────────────────────
-# anon0mesh Reticulum config — fixed for the synthesize_tunnel crash
-#
-# Changes from your previous config:
-#   1. FireZen disabled (firezen.com:4242 was unreachable → "No route to host").
-#      Keeping it `enabled = no` prevents the noisy error loop.
-#   2. Beleth stays enabled — it reconnected cleanly; the crash was the race,
-#      not the hub itself.
-#   3. transport = True added under [reticulum] — required for synthesize_tunnel
-#      to ever be meaningful, and surfacing it explicitly helps with debugging.
-# ─────────────────────────────────────────────────────────────────────────────
-
 [reticulum]
-  enable_transport = True
-  share_instance   = Yes
-  shared_instance_port = 37428
-  instance_control_port = 37429
+  enable_transport         = True
+  share_instance           = Yes
+  shared_instance_port     = 37428
+  instance_control_port    = 37429
   panic_on_interface_error = No
 
-# ── LOCAL INTERFACE (always enabled — loopback + LAN auto-discovery) ──────────
-[[ Default Interface ]]
-  type    = AutoInterface
-  enabled = yes
+[interfaces]
 
-# ── BELETH HUB (working) ──────────────────────────────────────────────────────
-[[ Beleth RNS Hub ]]
-  type        = TCPClientInterface
-  enabled     = yes
-  target_host = rns.beleth.net
-  target_port = 4242
+# ── Local discovery (LAN + localhost) ─────────────────────────────────────────
+  [[Default Interface]]
+    type    = AutoInterface
+    enabled = yes
 
-# ── FIREZEN (unreachable — disabled to suppress "No route to host" errors) ────
-[[ FireZen ]]
-  type        = TCPClientInterface
-  enabled     = no
-  target_host = firezen.com
-  target_port = 4242
+# ── Public TCP hubs ───────────────────────────────────────────────────────────
 
-# ── OPTIONAL: additional public hubs ─────────────────────────────────────────
-# Uncomment any of these to add redundancy.
-# Find more at https://rmap.world
-#
-# [[ Between The Borders ]]
-#   type        = TCPClientInterface
-#   enabled     = yes
-#   target_host = reticulum.betweentheborders.com
-#   target_port = 4242
-#
-# [[ RNS Testnet ]]
-#   type        = TCPClientInterface
-#   enabled     = yes
-#   target_host = testnet.unsigned.io
-#   target_port = 4242
+  [[Beleth RNS Hub]]
+    type        = TCPClientInterface
+    enabled     = yes
+    target_host = rns.beleth.net
+    target_port = 4242
+
+  [[g00n.cloud Hub]]
+    type        = TCPClientInterface
+    enabled     = yes
+    target_host = dfw.us.g00n.cloud
+    target_port = 6969
+
+  [[RNS Testnet BetweenTheBorders]]
+    type        = TCPClientInterface
+    enabled     = yes
+    target_host = reticulum.betweentheborders.com
+    target_port = 4242
+
+# Dublin DNS doesn't resolve — disabled for now
+#  [[RNS Testnet Dublin]]
+#    type        = TCPClientInterface
+#    enabled     = yes
+#    target_host = dublin.connect.reticulum.network
+#    target_port = 4965
+
+# ── RNode LoRa (Heltec V3 / SX1262) ─────────────────────────────────────────
+# Region: US 915 MHz
+# Serial: /dev/cu.usbserial-0001
+
+  [[RNode LoRa]]
+    type              = RNodeInterface
+    interface_enabled = True
+    port              = /dev/cu.usbserial-0001
+    speed             = 115200
+    databits          = 8
+    parity            = none
+    stopbits          = 1
+    flow_control      = False
+    frequency         = 915000000
+    bandwidth         = 125000
+    spreadingfactor   = 7
+    codingrate        = 5
+    txpower           = 22
