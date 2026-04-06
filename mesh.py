@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 mesh.py — Reticulum network layer
 ===================================
@@ -34,7 +35,7 @@ RNS.Transport.synthesize_tunnel = staticmethod(_safe_st)
 import state
 from shared import (
     APP_NAME, APP_ASPECT, RPC_PATH, ANNOUNCE_DATA,
-    RNS_REQUEST_TIMEOUT, build_rpc, decode_json,
+    RNS_REQUEST_TIMEOUT, build_rpc, decode_json, decompress_response,
     log_info, log_ok, log_warn, log_err,
     BOLD, GREEN, RED, RESET, DIM,
 )
@@ -221,7 +222,8 @@ class BeaconLink:
         def on_response(receipt):
             if receipt.response is not None and result_holder[0] is None:
                 try:
-                    parsed = decode_json(bytes(receipt.response))
+                    raw = decompress_response(bytes(receipt.response))
+                    parsed = decode_json(raw)
                     if "result" in parsed or "error" in parsed:
                         result_holder[0] = parsed
                         result_holder[1] = self.label

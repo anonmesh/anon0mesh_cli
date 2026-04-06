@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 shared.py — Common types, constants, and utilities for the
 anon0mesh / Reticulum Solana RPC bridge MVP.
@@ -15,6 +17,7 @@ Reticulum handles all encryption (X25519 + AES-256-GCM) automatically.
 
 import json
 import time
+import zlib
 from typing import Any
 
 # ── App identity (both sides must agree) ───────────────────────────────────────
@@ -64,6 +67,31 @@ def build_response(result: Any = None, error: str | None = None, req_id: int = 1
 def decode_json(raw: bytes) -> dict:
     """Safely decode JSON bytes."""
     return json.loads(raw.decode("utf-8"))
+
+
+# ── Mesh payload compression ─────────────────────────────────────────────────
+# Solana RPC responses are typically 1–10 KB of JSON.  LoRa links have ~1.2 kbps
+# throughput with a Reticulum MTU of ~465 bytes.  Compressing before transmission
+# reduces chunk count and latency significantly.
+#
+# Protocol: a 3-byte magic prefix (b"\x00zl") signals zlib-compressed data.
+# If compression doesn't shrink the payload, raw bytes are sent instead.
+# Receivers call decompress_response() which handles both cases transparently.
+
+_COMPRESS_MAGIC = b"\x00zl"
+
+def compress_response(data: bytes) -> bytes:
+    """Compress a response payload with zlib if it saves space."""
+    compressed = zlib.compress(data, level=6)
+    if len(compressed) + len(_COMPRESS_MAGIC) < len(data):
+        return _COMPRESS_MAGIC + compressed
+    return data
+
+def decompress_response(data: bytes) -> bytes:
+    """Decompress a response payload. Passes through uncompressed data."""
+    if data[:3] == _COMPRESS_MAGIC:
+        return zlib.decompress(data[3:])
+    return data
 
 
 # ── Pretty printers ────────────────────────────────────────────────────────────

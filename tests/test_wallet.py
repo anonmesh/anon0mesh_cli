@@ -280,15 +280,15 @@ def test_offline_sign_nonce_transfer_zero_lamports_still_signs(tmp_path):
     assert tx is not None
 
 
-# ── partial_sign_arcium_transfer ──────────────────────────────────────────────
+# ── partial_sign_execute_payment ──────────────────────────────────────────────
 
-def test_partial_sign_arcium_transfer_returns_base64(tmp_path):
+def test_partial_sign_execute_payment_returns_base64(tmp_path):
     payer   = _write_keypair(tmp_path / "payer.json")
     beacon  = Keypair()
     to      = Keypair()
     nonce   = Keypair()
 
-    tx = wallet.partial_sign_arcium_transfer(
+    tx = wallet.partial_sign_execute_payment(
         str(tmp_path / "payer.json"),
         str(beacon.pubkey()),
         str(nonce.pubkey()),
@@ -301,8 +301,8 @@ def test_partial_sign_arcium_transfer_returns_base64(tmp_path):
     assert len(decoded) > 0
 
 
-def test_partial_sign_arcium_transfer_missing_keypair(tmp_path, capsys):
-    result = wallet.partial_sign_arcium_transfer(
+def test_partial_sign_execute_payment_missing_keypair(tmp_path, capsys):
+    result = wallet.partial_sign_execute_payment(
         str(tmp_path / "missing.json"),
         str(Keypair().pubkey()),
         str(Keypair().pubkey()),
@@ -314,9 +314,9 @@ def test_partial_sign_arcium_transfer_missing_keypair(tmp_path, capsys):
     assert "Failed to load" in capsys.readouterr().out
 
 
-def test_partial_sign_arcium_transfer_invalid_address(tmp_path, capsys):
+def test_partial_sign_execute_payment_invalid_address(tmp_path, capsys):
     _write_keypair(tmp_path / "payer.json")
-    result = wallet.partial_sign_arcium_transfer(
+    result = wallet.partial_sign_execute_payment(
         str(tmp_path / "payer.json"),
         "not-a-valid-pubkey",
         "also-invalid",
