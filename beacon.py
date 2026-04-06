@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 beacon.py — anon0mesh Beacon Node (Receiver / RPC Gateway)
 ============================================================
