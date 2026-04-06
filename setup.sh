@@ -802,7 +802,7 @@ try:
     ))
     init_ix = initialize_nonce_account(InitializeNonceAccountParams(
         nonce_pubkey      = nonce_pub,
-        authorized_pubkey = payer_pub,
+        authority = payer_pub,
     ))
     bh  = Hash.from_string(blockhash)
     msg = Message.new_with_blockhash([create_ix, init_ix], payer_pub, bh)
