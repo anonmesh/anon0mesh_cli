@@ -54,9 +54,18 @@ INSTALL_CLIENT=false
 INSTALL_SYSTEMD=false
 INSTALL_BLE=false
 INSTALL_MESHTASTIC=false
+INSTALL_RNODE=false
 SETUP_WALLET=false
 SOLANA_NETWORK="devnet"
 NONINTERACTIVE=false
+
+# ── OS detection ────────────────────────────────────────────────────────────
+OS_TYPE="linux"
+PKG_MANAGER="apt-get"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  OS_TYPE="macos"
+  PKG_MANAGER="brew"
+fi
 
 # Wallet/nonce outputs — populated by Step 9, referenced in the summary
 WALLET_KEYPAIR_PATH=""
@@ -73,11 +82,12 @@ for arg in "$@"; do
     --systemd)   INSTALL_SYSTEMD=true ;;
     --ble)       INSTALL_BLE=true ;;
     --meshtastic) INSTALL_MESHTASTIC=true ;;
+    --rnode)      INSTALL_RNODE=true ;;
     --mainnet)     SOLANA_NETWORK="mainnet" ;;
     --devnet)      SOLANA_NETWORK="devnet" ;;
     --wallet-setup) SETUP_WALLET=true ;;
     --help|-h)
-      echo "Usage: $0 [--beacon] [--client] [--both] [--systemd] [--ble] [--meshtastic] [--mainnet|--devnet] [--wallet-setup]"
+      echo "Usage: $0 [--beacon] [--client] [--both] [--systemd] [--ble] [--rnode] [--meshtastic] [--mainnet|--devnet] [--wallet-setup]"
       exit 0 ;;
   esac
 done
@@ -110,9 +120,8 @@ if [[ "$NONINTERACTIVE" == false ]]; then
   [[ "$ble_choice" =~ ^[Yy]$ ]] && INSTALL_BLE=true
 
   echo ""
-  # Meshtastic disabled for now — uncomment to re-enable
-  # read -rp "Install Meshtastic (LoRa) support? [y/N]: " mesh_choice
-  # [[ "$mesh_choice" =~ ^[Yy]$ ]] && INSTALL_MESHTASTIC=true
+  read -rp "Configure RNode LoRa interface (Heltec V3)? [y/N]: " rnode_choice
+  [[ "$rnode_choice" =~ ^[Yy]$ ]] && INSTALL_RNODE=true
 
   if [[ "$INSTALL_BEACON" == true ]]; then
     echo ""
@@ -136,30 +145,55 @@ log_info "  Beacon:     $INSTALL_BEACON"
 log_info "  Client:     $INSTALL_CLIENT"
 log_info "  Network:    $SOLANA_NETWORK"
 log_info "  BLE:        $INSTALL_BLE"
+log_info "  RNode LoRa: $INSTALL_RNODE"
 log_info "  Meshtastic: $INSTALL_MESHTASTIC"
 log_info "  systemd:    $INSTALL_SYSTEMD"
+log_info "  OS:         $OS_TYPE ($PKG_MANAGER)"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # STEP 1 — System dependencies
 # ═════════════════════════════════════════════════════════════════════════════
 log_step "System dependencies"
 
-MISSING_PKGS=()
-for pkg in python3 python3-venv python3-pip curl wget; do
-  if ! command -v "$pkg" &>/dev/null && ! dpkg -l "$pkg" &>/dev/null 2>&1; then
-    MISSING_PKGS+=("$pkg")
+if [[ "$OS_TYPE" == "macos" ]]; then
+  # macOS — use Homebrew
+  if ! command -v brew &>/dev/null; then
+    log_err "Homebrew not found. Install it: https://brew.sh"
+    exit 1
   fi
-done
 
-if [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
-  log_info "Installing: ${MISSING_PKGS[*]}"
-  sudo apt-get update -qq
-  sudo apt-get install -y -qq "${MISSING_PKGS[@]}"
-fi
+  MISSING_CMDS=()
+  for cmd in python3 curl wget; do
+    command -v "$cmd" &>/dev/null || MISSING_CMDS+=("$cmd")
+  done
 
-if [[ "$INSTALL_BLE" == true ]]; then
-  log_info "Installing BLE system deps..."
-  sudo apt-get install -y -qq bluetooth bluez libbluetooth-dev || true
+  if [[ ${#MISSING_CMDS[@]} -gt 0 ]]; then
+    log_info "Installing via brew: ${MISSING_CMDS[*]}"
+    brew install "${MISSING_CMDS[@]}"
+  fi
+
+  if [[ "$INSTALL_BLE" == true ]]; then
+    log_info "BLE: macOS has native CoreBluetooth — no extra system deps needed."
+  fi
+else
+  # Linux — use apt-get
+  MISSING_PKGS=()
+  for pkg in python3 python3-venv python3-pip curl wget; do
+    if ! command -v "$pkg" &>/dev/null && ! dpkg -l "$pkg" &>/dev/null 2>&1; then
+      MISSING_PKGS+=("$pkg")
+    fi
+  done
+
+  if [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
+    log_info "Installing: ${MISSING_PKGS[*]}"
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq "${MISSING_PKGS[@]}"
+  fi
+
+  if [[ "$INSTALL_BLE" == true ]]; then
+    log_info "Installing BLE system deps..."
+    sudo apt-get install -y -qq bluetooth bluez libbluetooth-dev || true
+  fi
 fi
 
 log_ok "System dependencies OK"
@@ -315,6 +349,112 @@ if bad:
     sys.exit(1)
 print('Config syntax looks OK')
 " && log_ok "Config validated" || { log_err "Config validation failed — check $RNS_CONFIG_FILE"; exit 1; }
+
+# ═════════════════════════════════════════════════════════════════════════════
+# STEP 4b — RNode LoRa interface (Heltec V3)
+# ═════════════════════════════════════════════════════════════════════════════
+if [[ "$INSTALL_RNODE" == true ]]; then
+  log_step "RNode LoRa interface (Heltec V3)"
+
+  # ── Detect serial device ──────────────────────────────────────────────────
+  RNODE_PORT=""
+  SERIAL_DEVICES=()
+
+  if [[ "$OS_TYPE" == "macos" ]]; then
+    while IFS= read -r dev; do
+      [[ -n "$dev" ]] && SERIAL_DEVICES+=("$dev")
+    done < <(ls /dev/cu.usbserial-* /dev/cu.usbmodem-* /dev/cu.SLAB_USBtoUART* 2>/dev/null || true)
+  else
+    while IFS= read -r dev; do
+      [[ -n "$dev" ]] && SERIAL_DEVICES+=("$dev")
+    done < <(ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null || true)
+  fi
+
+  if [[ ${#SERIAL_DEVICES[@]} -eq 0 ]]; then
+    log_warn "No serial devices found."
+    log_info "  Plug in the Heltec V3 and check:"
+    if [[ "$OS_TYPE" == "macos" ]]; then
+      log_info "    ls /dev/cu.usbserial-*"
+    else
+      log_info "    ls /dev/ttyUSB*"
+    fi
+    echo ""
+    read -rp "  Enter serial port manually (or press Enter to skip): " manual_port
+    if [[ -n "$manual_port" ]]; then
+      RNODE_PORT="$manual_port"
+    fi
+  elif [[ ${#SERIAL_DEVICES[@]} -eq 1 ]]; then
+    RNODE_PORT="${SERIAL_DEVICES[0]}"
+    log_ok "Found serial device: $RNODE_PORT"
+  else
+    log_info "Multiple serial devices found:"
+    for i in "${!SERIAL_DEVICES[@]}"; do
+      echo "  $((i+1))) ${SERIAL_DEVICES[$i]}"
+    done
+    read -rp "  Select device [1-${#SERIAL_DEVICES[@]}]: " dev_choice
+    if [[ "$dev_choice" =~ ^[0-9]+$ ]] && (( dev_choice >= 1 && dev_choice <= ${#SERIAL_DEVICES[@]} )); then
+      RNODE_PORT="${SERIAL_DEVICES[$((dev_choice-1))]}"
+    else
+      log_warn "Invalid choice — skipping RNode setup"
+    fi
+  fi
+
+  if [[ -n "$RNODE_PORT" ]]; then
+    # ── Frequency region ──────────────────────────────────────────────────
+    echo ""
+    echo -e "${BOLD}LoRa frequency region:${R}"
+    echo "  1) EU 868 MHz  (Europe, Africa, Middle East)"
+    echo "  2) US 915 MHz  (Americas, Australia)"
+    read -rp "Choice [1/2, default=1]: " freq_choice
+
+    if [[ "$freq_choice" == "2" ]]; then
+      RNODE_FREQ=915000000
+      RNODE_TXPOWER=22
+      RNODE_REGION="US 915 MHz"
+    else
+      RNODE_FREQ=867200000
+      RNODE_TXPOWER=14
+      RNODE_REGION="EU 868 MHz"
+    fi
+
+    log_info "Configuring RNode: $RNODE_PORT @ $RNODE_REGION"
+
+    # ── Append RNode interface to existing Reticulum config ───────────────
+    cat >> "$RNS_CONFIG_FILE" << RNODE
+
+# ── RNODE LORA (Heltec V3 / SX1262) ─────────────────────────────────────────
+# Region: ${RNODE_REGION}
+# Serial: ${RNODE_PORT}
+
+[[RNode LoRa]]
+  type              = RNodeInterface
+  interface_enabled = True
+  port              = ${RNODE_PORT}
+  speed             = 115200
+  databits          = 8
+  parity            = none
+  stopbits          = 1
+  flow_control      = False
+  frequency         = ${RNODE_FREQ}
+  bandwidth         = 125000
+  spreadingfactor   = 7
+  codingrate        = 5
+  txpower           = ${RNODE_TXPOWER}
+RNODE
+
+    log_ok "RNode interface added to $RNS_CONFIG_FILE"
+    log_info "  Port:      $RNODE_PORT"
+    log_info "  Region:    $RNODE_REGION"
+    log_info "  SF7/BW125k → ~5.5 kbps raw, ~3.5 kbps usable"
+    echo ""
+    log_info "Make sure the Heltec V3 is flashed with RNode firmware:"
+    log_info "  pip install rns && rnodeconf --autoinstall"
+  else
+    log_warn "Skipping RNode setup — no serial port configured."
+    log_info "  Run setup.sh --rnode later, or add manually from:"
+    log_info "  $SCRIPT_DIR/config/reticulum_rnode.conf"
+  fi
+fi
 
 # ═════════════════════════════════════════════════════════════════════════════
 # STEP 5 — Meshtastic interface file

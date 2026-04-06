@@ -78,7 +78,7 @@ RNS.Transport.synthesize_tunnel = staticmethod(_safe_synthesize_tunnel)
 from shared import (
     APP_NAME, APP_ASPECT, RPC_PATH, ANNOUNCE_DATA,
     SOLANA_ENDPOINTS, RNS_REQUEST_TIMEOUT,
-    decode_json, build_response,
+    decode_json, build_response, compress_response,
     banner, log_info, log_ok, log_warn, log_err, log_tx,
     BOLD, CYAN, GREEN, RESET, DIM,
 )
@@ -330,7 +330,11 @@ def rpc_request_handler(path, data, request_id, link_id, remote_identity, reques
         if remote_identity else "anonymous"
     )
     log_info(f"Request from {remote_id_str}  path={path}  size={len(data)}B")
-    return forward_to_solana(bytes(data))
+    raw = forward_to_solana(bytes(data))
+    compressed = compress_response(raw)
+    if len(compressed) < len(raw):
+        log_info(f"Compressed response {len(raw)}B → {len(compressed)}B ({100 - len(compressed)*100//len(raw)}% saved)")
+    return compressed
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
