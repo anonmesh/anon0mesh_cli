@@ -261,6 +261,24 @@ if [[ "$INSTALL_CLIENT" == true ]]; then
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
+# STEP 3b — Node.js dependencies (Arcium shim)
+# ═════════════════════════════════════════════════════════════════════════════
+log_step "Node.js dependencies (Arcium shim)"
+
+if command -v node &>/dev/null && command -v npm &>/dev/null; then
+  NODE_VER=$(node --version)
+  log_info "Node.js $NODE_VER detected"
+  if [[ -f "$SCRIPT_DIR/package.json" ]]; then
+    log_info "Installing JS packages from package.json..."
+    (cd "$SCRIPT_DIR" && npm install --silent) && log_ok "npm install OK" \
+      || log_warn "npm install failed — Arcium shim may not work"
+  fi
+else
+  log_warn "Node.js not found — Arcium MPC features require Node.js 18+"
+  log_info "  Install: https://nodejs.org or: nvm install 18"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
 # STEP 4 — Reticulum config
 # ═════════════════════════════════════════════════════════════════════════════
 log_step "Reticulum config"
