@@ -286,66 +286,50 @@ cat > "$RNS_CONFIG_FILE" << RNSCFG
   instance_control_port    = 37429
   panic_on_interface_error = No
 
+[interfaces]
+
 # ── Local discovery (LAN + localhost) ─────────────────────────────────────────
-[[Default Interface]]
-  type    = AutoInterface
-  enabled = yes
+  [[Default Interface]]
+    type    = AutoInterface
+    enabled = yes
 
 # ── Public TCP hubs ───────────────────────────────────────────────────────────
 
-[[RNS Testnet Dublin]]
-  type        = TCPClientInterface
-  enabled     = yes
-  target_host = dublin.connect.reticulum.network
-  target_port = 4965
+  [[Beleth RNS Hub]]
+    type        = TCPClientInterface
+    enabled     = yes
+    target_host = rns.beleth.net
+    target_port = 4242
 
-[[RNS Testnet BetweenTheBorders]]
-  type        = TCPClientInterface
-  enabled     = yes
-  target_host = reticulum.betweentheborders.com
-  target_port = 4242
+  [[g00n.cloud Hub]]
+    type        = TCPClientInterface
+    enabled     = yes
+    target_host = dfw.us.g00n.cloud
+    target_port = 6969
 
-[[Beleth RNS Hub]]
-  type        = TCPClientInterface
-  enabled     = yes
-  target_host = rns.beleth.net
-  target_port = 4242
-
-[[g00n.cloud Hub]]
-  type        = TCPClientInterface
-  enabled     = yes
-  target_host = dfw.us.g00n.cloud
-  target_port = 6969
-
-# ── Bluetooth BLE ─────────────────────────────────────────────────────────────
-# enabled = ${BLE_ENABLED}  (set by setup.sh based on your choice)
-
-[[BLE Interface]]
-  type    = BLEInterface
-  enabled = ${BLE_ENABLED}
-
-# ── Meshtastic / LoRa ─────────────────────────────────────────────────────────
-# Commented out — hardware not connected yet.
-# To enable: uncomment, set device path, and re-run setup.sh --meshtastic
-#
-# [[Meshtastic]]
-#   type    = Meshtastic_Interface
-#   enabled = no
-#   device  = /dev/ttyUSB0
+  [[RNS Testnet BetweenTheBorders]]
+    type        = TCPClientInterface
+    enabled     = yes
+    target_host = reticulum.betweentheborders.com
+    target_port = 4242
 RNSCFG
 
 log_ok "Reticulum config written → $RNS_CONFIG_FILE"
 
 # ── Validate config ────────────────────────────────────────────────────────────
 python -c "
-import configparser, sys
-# RNS uses its own parser but basic INI check catches most errors
+import sys, re
 cfg = open('$RNS_CONFIG_FILE').read()
-# Check for common indentation error: [[section]] with leading spaces
-import re
-bad = [i+1 for i,l in enumerate(cfg.splitlines()) if re.match(r' +\[\[', l)]
-if bad:
-    print('ERROR: [[section]] headers have leading spaces on lines:', bad)
+lines = cfg.splitlines()
+has_reticulum = any(l.strip() == '[reticulum]' for l in lines)
+has_interfaces = any(l.strip() == '[interfaces]' for l in lines)
+errors = []
+if not has_reticulum:
+    errors.append('Missing [reticulum] section')
+if not has_interfaces:
+    errors.append('Missing [interfaces] section')
+if errors:
+    for e in errors: print('ERROR:', e)
     sys.exit(1)
 print('Config syntax looks OK')
 " && log_ok "Config validated" || { log_err "Config validation failed — check $RNS_CONFIG_FILE"; exit 1; }
@@ -426,20 +410,20 @@ if [[ "$INSTALL_RNODE" == true ]]; then
 # Region: ${RNODE_REGION}
 # Serial: ${RNODE_PORT}
 
-[[RNode LoRa]]
-  type              = RNodeInterface
-  interface_enabled = True
-  port              = ${RNODE_PORT}
-  speed             = 115200
-  databits          = 8
-  parity            = none
-  stopbits          = 1
-  flow_control      = False
-  frequency         = ${RNODE_FREQ}
-  bandwidth         = 125000
-  spreadingfactor   = 7
-  codingrate        = 5
-  txpower           = ${RNODE_TXPOWER}
+  [[RNode LoRa]]
+    type              = RNodeInterface
+    interface_enabled = True
+    port              = ${RNODE_PORT}
+    speed             = 115200
+    databits          = 8
+    parity            = none
+    stopbits          = 1
+    flow_control      = False
+    frequency         = ${RNODE_FREQ}
+    bandwidth         = 125000
+    spreadingfactor   = 7
+    codingrate        = 5
+    txpower           = ${RNODE_TXPOWER}
 RNODE
 
     log_ok "RNode interface added to $RNS_CONFIG_FILE"
