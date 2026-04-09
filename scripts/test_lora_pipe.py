@@ -185,20 +185,25 @@ def run_tests(link):
     for name, payload in PAYLOADS:
         info(f"Sending {name} ({len(payload)} bytes)...")
         t0 = time.time()
-        receipt = link.request(TEST_PATH, payload, timeout=REQUEST_TIMEOUT)
+        receipt = link.request(TEST_PATH, data=payload, timeout=REQUEST_TIMEOUT)
 
-        # Wait for response
-        while receipt.response is None and not receipt.request_timed_out:
+        if receipt is False:
+            err(f"{name}: link.request() returned False (couldn't send)")
+            results.append((name, False, 0, 0, 0, 0))
+            continue
+
+        # Wait for response using correct RNS API
+        while not receipt.concluded():
             time.sleep(0.05)
 
         rtt = (time.time() - t0) * 1000  # ms
 
-        if receipt.request_timed_out:
-            err(f"{name}: TIMEOUT after {rtt:.0f}ms")
+        if receipt.get_status() != RNS.RequestReceipt.READY:
+            err(f"{name}: TIMEOUT/FAILED after {rtt:.0f}ms (status={receipt.get_status()})")
             results.append((name, False, rtt, 0, 0, 0))
             continue
 
-        raw_resp = bytes(receipt.response)
+        raw_resp = bytes(receipt.get_response())
         decompressed = decompress_response(raw_resp)
         was_compressed = len(raw_resp) != len(decompressed)
 
