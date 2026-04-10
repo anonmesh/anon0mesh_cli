@@ -9,7 +9,7 @@ Uses Flasher's dual-instance configs (relay on 37430, exit on 37432).
 No hardware required — TCP localhost simulates the LoRa link.
 
 Usage:
-  python scripts/test_tcp_bridge.py
+  python tests/test_tcp_bridge.py
 """
 from __future__ import annotations
 

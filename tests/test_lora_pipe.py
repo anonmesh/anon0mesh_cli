@@ -16,10 +16,10 @@ Modes:
                Use the destination hash printed by --beacon.
 
 Usage:
-  python scripts/test_lora_pipe.py                         # loopback
-  python scripts/test_lora_pipe.py --config path/to/conf   # with RNode config
-  python scripts/test_lora_pipe.py --beacon                # two-radio: beacon
-  python scripts/test_lora_pipe.py --client <hash>         # two-radio: client
+  python tests/test_lora_pipe.py                         # loopback
+  python tests/test_lora_pipe.py --config path/to/conf   # with RNode config
+  python tests/test_lora_pipe.py --beacon                # two-radio: beacon
+  python tests/test_lora_pipe.py --client <hash>         # two-radio: client
 """
 
 import sys
@@ -334,7 +334,7 @@ def run_beacon(config_path):
     print(f"  {BOLD}{CYAN}┌─ TEST BEACON READY ──────────────────────────────────┐{RESET}")
     print(f"  {BOLD}{CYAN}│{RESET}  Hash: {GREEN}{BOLD}{dest_hash}{RESET}")
     print(f"  {BOLD}{CYAN}│{RESET}  Run on other device:")
-    print(f"  {BOLD}{CYAN}│{RESET}    python scripts/test_lora_pipe.py --client {destination.hexhash}")
+    print(f"  {BOLD}{CYAN}│{RESET}    python tests/test_lora_pipe.py --client {destination.hexhash}")
     print(f"  {BOLD}{CYAN}└──────────────────────────────────────────────────────┘{RESET}")
     print()
 
