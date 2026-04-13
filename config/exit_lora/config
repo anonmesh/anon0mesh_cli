@@ -1,0 +1,40 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# anon0mesh — EXIT NODE (LoRa + Internet)
+#
+# This node has both a LoRa radio (to receive relayed transactions from the
+# mesh) and internet connectivity (to forward them to Solana RPC). It runs
+# exit_node.py which bridges mesh RPC requests to Solana devnet.
+#
+# Heltec V3 #2: /dev/cu.usbserial-0001
+# Reticulum instance ports: 37442/37443 (isolated from relay node)
+# ─────────────────────────────────────────────────────────────────────────────
+
+[reticulum]
+  enable_transport      = True
+  share_instance        = Yes
+  shared_instance_port  = 37442
+  instance_control_port = 37443
+  panic_on_interface_error = No
+
+[logging]
+  loglevel = 5
+
+[interfaces]
+
+  # LoRa interface — receives mesh traffic from relay node
+  [[RNode LoRa Exit]]
+    type              = RNodeInterface
+    interface_enabled = True
+    port              = /dev/cu.usbserial-0001
+    speed             = 115200
+    databits          = 8
+    parity            = none
+    stopbits          = 1
+    flow_control      = False
+
+    # US 915 MHz — must match relay node exactly
+    frequency         = 915000000
+    bandwidth         = 125000
+    spreadingfactor   = 7
+    codingrate        = 5
+    txpower           = 22

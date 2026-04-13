@@ -437,6 +437,8 @@ def main():
                         help=f"Lamports to transfer (default: {TRANSFER_LAMPORTS:,})")
     parser.add_argument("--airdrop", default=AIRDROP_LAMPORTS, type=int,
                         help=f"Airdrop amount in lamports (default: {AIRDROP_LAMPORTS:,})")
+    parser.add_argument("--keypair", "-k", default=None, metavar="PATH",
+                        help="Path to pre-funded keypair JSON (skip airdrop)")
     args = parser.parse_args()
 
     if not args.beacon and not args.discover:
@@ -458,10 +460,17 @@ def main():
     setup_mesh(args)
 
     with tempfile.TemporaryDirectory(prefix="anon0mesh_demo_") as tmpdir:
-        # ── Step 1: Generate keypair ───────────────────────────────────────────
+        # ── Step 1: Generate or load keypair ─────────────────────────────────
         print(f"\n  {BOLD}{CYAN}━━━ Step 1: Generate Keypair ━━━{RESET}")
         t0 = time.monotonic()
-        payer, wallet_path = step_generate_keypair(tmpdir)
+        if args.keypair:
+            with open(args.keypair, "r") as f:
+                kp_bytes = bytes(json.load(f))
+            payer = Keypair.from_bytes(kp_bytes)
+            wallet_path = args.keypair
+            log_ok(f"Loaded keypair: {payer.pubkey()}")
+        else:
+            payer, wallet_path = step_generate_keypair(tmpdir)
         payer_addr = str(payer.pubkey())
         recipient = args.recipient or payer_addr  # send to self if no recipient
         timer.mark("Generate keypair", t0)
@@ -469,26 +478,33 @@ def main():
         if recipient == payer_addr:
             log_info("No --recipient specified — sending to self")
 
-        # ── Step 2: Airdrop ────────────────────────────────────────────────────
+        # ── Step 2: Airdrop (or check balance if pre-funded) ─────────────────
         print(f"\n  {BOLD}{CYAN}━━━ Step 2: Airdrop ━━━{RESET}")
-        sig = step_airdrop(payer_addr, args.airdrop, timer)
-        if sig is None:
-            log_err("Airdrop failed — cannot continue")
-            sys.exit(1)
-
-        # Wait for balance to arrive (devnet propagation can lag)
+        # Check existing balance first
         bal = 0
-        for attempt in range(15):
-            resp = mesh_rpc("getBalance", [payer_addr, {"commitment": "confirmed"}])
-            if resp and "result" in resp:
-                bal = extract_result(resp)
-                if isinstance(bal, int) and bal > 0:
-                    log_ok(f"Balance: {bal / 1e9:.9f} SOL")
-                    break
-            if attempt < 14:
-                time.sleep(2)
+        resp = mesh_rpc("getBalance", [payer_addr, {"commitment": "confirmed"}])
+        if resp and "result" in resp:
+            bal = extract_result(resp)
+            if isinstance(bal, int) and bal > 0:
+                log_ok(f"Existing balance: {bal / 1e9:.9f} SOL — skipping airdrop")
+
         if not bal:
-            log_warn("Balance still 0 after retries — proceeding anyway")
+            sig = step_airdrop(payer_addr, args.airdrop, timer)
+            if sig is None:
+                log_err("Airdrop failed — cannot continue")
+                sys.exit(1)
+            # Wait for balance to arrive (devnet propagation can lag)
+            for attempt in range(15):
+                resp = mesh_rpc("getBalance", [payer_addr, {"commitment": "confirmed"}])
+                if resp and "result" in resp:
+                    bal = extract_result(resp)
+                    if isinstance(bal, int) and bal > 0:
+                        log_ok(f"Balance: {bal / 1e9:.9f} SOL")
+                        break
+                if attempt < 14:
+                    time.sleep(2)
+            if not bal:
+                log_warn("Balance still 0 after retries — proceeding anyway")
 
         # ── Step 3: Create nonce account ───────────────────────────────────────
         print(f"\n  {BOLD}{CYAN}━━━ Step 3: Create Durable Nonce Account ━━━{RESET}")
