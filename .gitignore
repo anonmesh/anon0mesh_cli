@@ -13,3 +13,4 @@ nonce_*.json
 config/*/storage/
 config/*/interfaces/
 *.identity
+*_identity
