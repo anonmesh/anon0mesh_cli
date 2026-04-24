@@ -32,13 +32,13 @@ log_err()   { echo -e "${DIM}[$(date +%H:%M:%S)]${R} ${RED}✘  $*${R}"; }
 log_step()  { echo -e "\n${BOLD}${CYAN}━━━  $*  ━━━${R}\n"; }
 log_banner(){ echo -e "
 ${BOLD}${CYAN}
-  █████╗ ███╗  ██╗ ██████╗ ███╗  ██╗ ██████╗     ███╗  ███╗███████╗███████╗██╗  ██╗
- ██╔══██╗████╗ ██║██╔═══██╗████╗ ██║██╔═══██╗    ████╗████║██╔════╝██╔════╝██║  ██║
- ███████║██╔██╗██║██║   ██║██╔██╗██║██║   ██║    ██╔████╔██║█████╗  ███████╗███████║
- ██╔══██║██║╚████║██║   ██║██║╚████║██║   ██║    ██║╚██╔╝██║██╔══╝  ╚════██║██╔══██║
- ██║  ██║██║ ╚███║╚██████╔╝██║ ╚███║╚██████╔╝    ██║ ╚═╝ ██║███████╗███████║██║  ██║
- ╚═╝  ╚═╝╚═╝  ╚══╝ ╚═════╝ ╚═╝  ╚══╝ ╚═════╝    ╚═╝     ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝
-${R}${DIM}              a n o n 0 m e s h  ·  Mesh First, Chain When It Matters${R}
+  █████╗ ███╗  ██╗ ██████╗ ███╗  ██╗    ███╗  ███╗███████╗███████╗██╗  ██╗
+ ██╔══██╗████╗ ██║██╔═══██╗████╗ ██║    ████╗████║██╔════╝██╔════╝██║  ██║
+ ███████║██╔██╗██║██║   ██║██╔██╗██║    ██╔████╔██║█████╗  ███████╗███████║
+ ██╔══██║██║╚████║██║   ██║██║╚████║    ██║╚██╔╝██║██╔══╝  ╚════██║██╔══██║
+ ██║  ██║██║ ╚███║╚██████╔╝██║ ╚███║    ██║ ╚═╝ ██║███████╗███████║██║  ██║
+ ╚═╝  ╚═╝╚═╝  ╚══╝ ╚═════╝ ╚═╝  ╚══╝    ╚═╝     ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝
+${R}${DIM}              a n o n m e s h  ·  Mesh First, Chain When It Matters${R}
 ${BOLD}                              Setup Script  ·  Powered by Reticulum${R}
 "; }
 
@@ -258,6 +258,24 @@ if [[ "$INSTALL_CLIENT" == true ]]; then
     || log_warn "solders not available — offline signing disabled"
   python -c "import qrcode" && log_ok "qrcode import OK (wallet QR display enabled)" \
     || log_warn "qrcode not available — wallet QR display disabled"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# STEP 3b — Node.js dependencies (Arcium shim)
+# ═════════════════════════════════════════════════════════════════════════════
+log_step "Node.js dependencies (Arcium shim)"
+
+if command -v node &>/dev/null && command -v npm &>/dev/null; then
+  NODE_VER=$(node --version)
+  log_info "Node.js $NODE_VER detected"
+  if [[ -f "$SCRIPT_DIR/package.json" ]]; then
+    log_info "Installing JS packages from package.json..."
+    (cd "$SCRIPT_DIR" && npm install --silent) && log_ok "npm install OK" \
+      || log_warn "npm install failed — Arcium shim may not work"
+  fi
+else
+  log_warn "Node.js not found — Arcium MPC features require Node.js 18+"
+  log_info "  Install: https://nodejs.org or: nvm install 18"
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════

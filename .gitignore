@@ -1,4 +1,6 @@
 venv/
+.venv/
+config/storage/
 __pycache__/
 node_modules/
 reticulum_config/
@@ -8,3 +10,6 @@ run_client.sh
 wallet.json
 wallet_*.json
 nonce_*.json
+config/*/storage/
+config/*/interfaces/
+*.identity

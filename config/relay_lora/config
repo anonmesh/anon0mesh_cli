@@ -1,0 +1,43 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# anon0mesh — RELAY NODE (LoRa only)
+#
+# This node simulates an offline relay. It has NO internet connectivity —
+# only a LoRa radio link to the exit node. In production, a phone connects
+# via BLE and submits transactions; for testing, we run beacon.py or a
+# test client against this instance.
+#
+# Heltec V3 #1: /dev/cu.usbserial-4
+# Reticulum instance ports: 37440/37441 (isolated from exit node)
+# ─────────────────────────────────────────────────────────────────────────────
+
+[reticulum]
+  enable_transport      = True
+  share_instance        = Yes
+  shared_instance_port  = 37440
+  instance_control_port = 37441
+  panic_on_interface_error = No
+
+[logging]
+  loglevel = 5
+
+[interfaces]
+
+  # LoRa only — no AutoInterface, no TCP hubs.
+  # This node is intentionally isolated from the internet.
+
+  [[RNode LoRa Relay]]
+    type              = RNodeInterface
+    interface_enabled = True
+    port              = /dev/cu.usbserial-4
+    speed             = 115200
+    databits          = 8
+    parity            = none
+    stopbits          = 1
+    flow_control      = False
+
+    # US 915 MHz — must match exit node exactly
+    frequency         = 915000000
+    bandwidth         = 125000
+    spreadingfactor   = 7
+    codingrate        = 5
+    txpower           = 22
