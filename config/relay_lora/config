@@ -6,7 +6,8 @@
 # via BLE and submits transactions; for testing, we run beacon.py or a
 # test client against this instance.
 #
-# Heltec V3 #1: /dev/cu.usbserial-4
+# Heltec V3 #1: /dev/cu.usbserial-4 (override locally if your USB enumerates
+# to a different port — do not commit machine-specific port renames)
 # Reticulum instance ports: 37440/37441 (isolated from exit node)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -21,9 +22,6 @@
   loglevel = 5
 
 [interfaces]
-
-  # LoRa only — no AutoInterface, no TCP hubs.
-  # This node is intentionally isolated from the internet.
 
   [[RNode LoRa Relay]]
     type              = RNodeInterface
@@ -41,3 +39,18 @@
     spreadingfactor   = 7
     codingrate        = 5
     txpower           = 22
+
+  # ─── Phone-to-laptop bridge ──────────────────────────────────────────────
+  # Local-network TCP listener on port 4243. Phones running the LXMF Expo app
+  # connect here as a TCPClientInterface, joining the same Reticulum instance
+  # as the LoRa relay above. This lets a phone reach the LoRa mesh without
+  # being physically tethered to a Heltec — useful for development, demos,
+  # and as a fallback when no Heltec is available on the host machine.
+  #
+  # In production deployments where the relay must remain offline, set
+  # interface_enabled = False or remove this block.
+  [[TCP Server Relay]]
+    type              = TCPServerInterface
+    interface_enabled = True
+    listen_ip         = 0.0.0.0
+    listen_port       = 4243
