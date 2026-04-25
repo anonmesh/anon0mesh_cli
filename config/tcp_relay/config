@@ -1,0 +1,20 @@
+# Minimal TCP-only Reticulum hub for phone-to-phone testing
+# Both example-app phones connect here via TCPClientInterface
+
+[reticulum]
+  enable_transport      = True
+  share_instance        = Yes
+  shared_instance_port  = 37450
+  instance_control_port = 37451
+  panic_on_interface_error = No
+
+[logging]
+  loglevel = 5
+
+[interfaces]
+
+  [[TCP Server Hub]]
+    type              = TCPServerInterface
+    interface_enabled = True
+    listen_ip         = 0.0.0.0
+    listen_port       = 4243
